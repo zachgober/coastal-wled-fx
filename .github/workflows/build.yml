@@ -1,0 +1,66 @@
+name: Build Coastal FX firmware
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  WLED_VERSION: v16.0.1   # must match the version on the board
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get Coastal FX
+        uses: actions/checkout@v4
+        with:
+          path: coastal
+
+      - name: Get WLED ${{ env.WLED_VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: wled/WLED
+          ref: ${{ env.WLED_VERSION }}
+          path: wled
+
+      - name: Add Coastal FX to WLED
+        run: |
+          cp -r coastal/usermods/coastal_fx wled/usermods/
+          cp coastal/platformio_override.ini wled/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: wled/.nvmrc
+          cache: npm
+          cache-dependency-path: wled/package-lock.json
+      - name: Install web UI build tools
+        working-directory: wled
+        run: npm ci
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio/.cache
+          key: pio-${{ env.WLED_VERSION }}
+      - name: Install PlatformIO
+        working-directory: wled
+        run: pip install -r requirements.txt
+
+      - name: Build firmware
+        working-directory: wled
+        run: pio run -e coastal_esp32
+
+      - name: Rename firmware
+        run: |
+          mkdir out
+          cp wled/build_output/release/*.bin out/Coastal-FX_WLED-16.0.1_ESP32.bin
+          ls -l out
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: Coastal-FX-firmware
+          path: out/*.bin
