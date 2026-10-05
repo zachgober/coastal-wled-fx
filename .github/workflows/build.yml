@@ -2,7 +2,11 @@ name: Build Coastal FX firmware
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 env:
   WLED_VERSION: v16.0.1   # must match the version on the board
@@ -58,6 +62,28 @@ jobs:
           mkdir out
           cp wled/build_output/release/*.bin out/Coastal-FX_WLED-16.0.1_ESP32.bin
           ls -l out
+
+      - name: Check the effects are in the firmware
+        run: |
+          BIN=out/Coastal-FX_WLED-16.0.1_ESP32.bin
+          missing=0
+          for fx in "Holiday Bulbs@" "Holiday Twinkle@" "Candy Cane@" "Retro C9@" "Fireworks Burst@" \
+                    "Ocean Swell@" "Lightning Storm@" "Sunrise@Minutes" "Boom Fireworks@"; do
+            if strings "$BIN" | grep -q "$fx"; then echo "ok: $fx"; else echo "MISSING: $fx"; missing=1; fi
+          done
+          { echo "Built $(date -u +%F' '%H:%MZ) from ${GITHUB_SHA::7}"; echo "Size: $(stat -c%s $BIN) bytes";
+            echo "Release name: $(strings $BIN | grep -m1 -x ESP32 || echo '?')"; } > out/build-info.txt
+          strings "$BIN" | grep -E "@" | grep -E "Holiday|Candy|Retro C9|Fireworks Burst|Ocean Swell|Lightning Storm|Sunrise@Minutes|Boom" >> out/build-info.txt
+          exit $missing
+
+      - name: Publish firmware to the 'firmware' branch (direct download link)
+        run: |
+          cd out
+          git init -q -b firmware
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A && git commit -q -m "Firmware from ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" firmware
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
