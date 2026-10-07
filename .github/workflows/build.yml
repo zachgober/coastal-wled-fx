@@ -68,12 +68,12 @@ jobs:
           BIN=out/Coastal-FX_WLED-16.0.1_ESP32.bin
           missing=0
           for fx in "Holiday Bulbs@" "Holiday Twinkle@" "Candy Cane@" "Retro C9@" "Fireworks Burst@" \
-                    "Ocean Swell@" "Lightning Storm@" "Sunrise@Minutes" "Boom Fireworks@" "Pool Shimmer@"; do
+                    "Ocean Swell@" "Lightning Storm@" "Sunrise@Minutes" "Boom Fireworks@" "Pool Shimmer@" "Northern Lights@"; do
             if strings "$BIN" | grep -q "$fx"; then echo "ok: $fx"; else echo "MISSING: $fx"; missing=1; fi
           done
           { echo "Built $(date -u +%F' '%H:%MZ) from ${GITHUB_SHA::7}"; echo "Size: $(stat -c%s $BIN) bytes";
             echo "Release name: $(strings $BIN | grep -m1 -x ESP32 || echo '?')"; } > out/build-info.txt
-          strings "$BIN" | grep -E "@" | grep -E "Holiday|Candy|Retro C9|Fireworks Burst|Ocean Swell|Lightning Storm|Sunrise@Minutes|Boom|Pool Shimmer" >> out/build-info.txt
+          strings "$BIN" | grep -E "@" | grep -E "Holiday|Candy|Retro C9|Fireworks Burst|Ocean Swell|Lightning Storm|Sunrise@Minutes|Boom|Pool Shimmer|Northern Lights" >> out/build-info.txt
           exit $missing
 
       - name: Publish firmware to the 'firmware' branch (direct download link)

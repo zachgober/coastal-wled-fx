@@ -14,12 +14,13 @@ Eight custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps 
 | Sunrise | Night → red → amber → warm white | Minutes (1–64), Sunset (reverse) |
 | Boom Fireworks 🎵 | Listens to the mic: real bangs launch bursts sized by loudness; big booms flash and crackle | Sensitivity, Burst size, Fade, Cooldown, Big-boom flash, Show mic level |
 | Pool Shimmer | Sunlight-through-water caustics: thin bright ribbons drifting and crossing over pool blue | Speed, Sparkle, Ripple size, Warm sun |
+| Northern Lights | Aurora curtains folding over a night sky: green cores, purple fringes, fine rays, slow surges | Speed, Activity, Curtain size, Stars |
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–229** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-229" when the firmware is running.
+Effect IDs on this build: **220–230** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-230" when the firmware is running.
 
 ## Build (GitHub, no software to install)
 
@@ -43,7 +44,7 @@ Effect IDs on this build: **220–229** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-229".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-230".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)

@@ -532,6 +532,65 @@ void mode_pool_shimmer() {
 const char _data_pool_shimmer[] PROGMEM =
   "Pool Shimmer@Speed,Sparkle,Ripple size,,,Warm sun;!,!;;1;sx=70,ix=150,c1=80,o1=0";
 
+
+// ---------------------------------------------------------------- Northern Lights
+// Aurora curtains over a dark night sky: broad green glows that slowly drift, fold and
+// fade, fringed with purple/pink, with fine "rays" rippling through them and slow surges
+// of activity. Optional faint stars twinkle in the dark gaps.
+//   Speed        - drift speed of the curtains
+//   Activity     - how much of the sky is lit and how bright
+//   Curtain size - width of the glowing bands
+//   Color 1 = main aurora (default green), Color 2 = fringe (default purple), Color 3 = sky
+//   Checkbox "Stars"
+void mode_northern_lights() {
+  const int len = SEGLEN;
+  if (len < 1) { staticFallback(); return; }
+  uint32_t green = SEGCOLOR(0) ? SEGCOLOR(0) : RGBW32(10, 255, 90, 0);
+  uint32_t fringe = SEGCOLOR(1) ? SEGCOLOR(1) : RGBW32(150, 30, 255, 0);
+  uint32_t sky = SEGCOLOR(2) ? SEGCOLOR(2) : RGBW32(0, 2, 10, 0);
+
+  const uint32_t t = (uint32_t)strip.now * (SEGMENT.speed + 8) >> 9;      // slow clock
+  const uint16_t cell = 6 + (SEGMENT.custom1 >> 3);                        // pixels per curtain: 6..37
+  const uint16_t step = 256 / cell;
+  // activity: threshold for where curtains glow; a slow "substorm" surge raises it now and then
+  const uint8_t surge = sin8_t((uint8_t)(strip.now >> 9)) >> 2;            // 0..63, ~2 min cycle
+  const int thresh = 150 - (SEGMENT.intensity >> 1) - surge;               // lower = more lit
+
+  for (int i = 0; i < len; i++) {
+    const uint16_t x = i * step;
+    // the curtain body: big, slowly folding noise
+    // two layers folding against each other so curtains grow, merge and split instead of scrolling
+    const int b1 = perlin8(x + t, t >> 2);
+    const int b2 = perlin8(x * 2 / 3 - (t >> 1) + 22000, (t >> 3) + 5000);
+    int body = b1 > b2 ? b1 : b2;
+    int glow = (body - thresh) * 255 / (256 - thresh > 1 ? 256 - thresh : 1);
+    if (glow < 0) glow = 0;
+    if (glow > 255) glow = 255;
+    glow = (glow * glow) >> 8;                                             // soft edges
+    // rays: fine, faster ripples inside the curtain
+    const uint8_t ray = perlin8(x * 4 + (t << 1), t + 7000);
+    glow = (glow * (150 + (ray >> 1) + (ray >> 2))) >> 8;                  // 150..341 / 256
+    if (glow > 255) glow = 255;
+
+    // colour: green core, purple/pink where the curtain is thin or the fringe noise says so
+    const uint8_t fr = perlin8(x / 2 + 15000, (t >> 3) + 3000);
+    // thin parts of a curtain and drifting patches go purple/pink; the bright core stays green
+    int mixF = (glow < 170 ? (170 - glow) * 3 / 2 : 0) + (fr > 150 ? (fr - 150) * 2 : 0);
+    if (mixF > 230) mixF = 230;
+    uint32_t aur = color_blend(green, fringe, (uint8_t)mixF);
+    uint32_t px = color_blend(sky, aur, (uint8_t)glow);
+
+    // stars in the dark gaps
+    if (SEGMENT.check1 && glow < 20) {
+      const uint8_t tw = perlin8(i * 911 + 40000, (strip.now >> 3) + i * 37);
+      if (((i * 2654435761u) >> 27) == 3 && tw > 140) px = color_blend(px, WARM, (tw - 140) * 2);
+    }
+    SEGMENT.setPixelColor(i, px);
+  }
+}
+const char _data_northern_lights[] PROGMEM =
+  "Northern Lights@Speed,Activity,Curtain size,,,Stars;!,!,!;;1;sx=60,ix=120,c1=100,o1=1";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -559,6 +618,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_sunrise,          _data_sunrise);
     add(&mode_boom_fireworks,   _data_boom_fireworks);   // new effects go at the end so ids don't shift
     add(&mode_pool_shimmer,     _data_pool_shimmer);
+    add(&mode_northern_lights,  _data_northern_lights);
   }
 
   void loop() override {}
