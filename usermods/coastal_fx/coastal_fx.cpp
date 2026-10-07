@@ -480,6 +480,58 @@ const char _data_boom_fireworks[] PROGMEM =
   "Boom Fireworks@Sensitivity,Burst size,Fade,Cooldown,,Big-boom flash,Show mic level;;!;1f;"
   "sx=170,ix=140,c1=110,c2=60,o1=1,o2=0,pal=11";
 
+
+// ---------------------------------------------------------------- Pool Shimmer
+// Sunlight through moving water, playing on a wall: thin, bright, constantly shifting
+// ribbons of light (caustics) over deep pool blue. Two layers of slowly morphing noise
+// drift against each other; where a layer's value crosses its midpoint a sharp bright
+// line forms, and where both layers' lines meet they flare brighter.
+//   Speed      - how fast the water moves
+//   Sparkle    - brightness and sharpness of the light ribbons
+//   Ripple size- width of the ripples (small = choppy, large = lazy swell)
+//   Color 1 = light ribbons (default crystal aqua-white), Color 2 = water (default pool blue)
+//   Checkbox "Warm sun" tints the highlights with the warm-white chip (late-afternoon look)
+inline uint8_t ridge(uint8_t n) {
+  // 255 on the noise midline, falling off fast either side: makes thin bright lines
+  const uint8_t d = n > 128 ? n - 128 : 128 - n;   // 0..128
+  uint16_t r = 255 - (d >= 51 ? 255 : d * 5);     // 255 at midline, 0 a short way off it
+  r = (r * r) >> 8;                                // sharpen
+  r = (r * r) >> 8;
+  return (uint8_t)r;
+}
+
+void mode_pool_shimmer() {
+  const int len = SEGLEN;
+  if (len < 1) { staticFallback(); return; }
+  uint32_t cols[3];
+  slotColors(cols, RGBW32(150, 235, 255, 60), RGBW32(0, 55, 130, 0));   // aqua-white light, pool blue
+  const uint32_t light = cols[0], water = cols[1];
+
+  const uint32_t t = (uint32_t)strip.now * (SEGMENT.speed + 16) >> 8;     // shared clock
+  const uint16_t cell = 3 + (SEGMENT.custom1 >> 4);                        // pixels per ripple: 3..18
+  const uint16_t step = 256 / cell;                                        // noise units per pixel
+  const uint16_t gain = 64 + (SEGMENT.intensity >> 1) + (SEGMENT.intensity >> 2);  // 64..255
+
+  for (int i = 0; i < len; i++) {
+    const uint16_t x = i * step;
+    // two layers, drifting opposite ways and morphing over time (2nd noise axis)
+    const uint8_t a = ridge(perlin8(x + (t >> 1),          t >> 2));
+    const uint8_t b = ridge(perlin8(x * 3 / 2 - (t >> 2) + 9000, (t >> 3) + 31000));
+    uint16_t c = ((uint16_t)a + b) / 3 + (((uint16_t)a * b) >> 7);         // thin lines, crossings flare
+    c = (c * gain) >> 7;
+    if (c > 255) c = 255;
+
+    // the water itself breathes slightly between deep and lighter blue
+    const uint8_t depth = perlin8(x / 3 + 20000, t >> 4);
+    uint32_t px = color_fade(color_blend(water, color_blend(water, light, 40), depth >> 1), 150 + (depth >> 2), true);
+    uint32_t hi = SEGMENT.check1 ? color_blend(light, WARM, 110) : light;
+    px = color_blend(px, hi, (uint8_t)c);
+    SEGMENT.setPixelColor(i, px);
+  }
+}
+const char _data_pool_shimmer[] PROGMEM =
+  "Pool Shimmer@Speed,Sparkle,Ripple size,,,Warm sun;!,!;;1;sx=70,ix=150,c1=80,o1=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -506,6 +558,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_lightning_storm,  _data_lightning_storm);
     add(&mode_sunrise,          _data_sunrise);
     add(&mode_boom_fireworks,   _data_boom_fireworks);   // new effects go at the end so ids don't shift
+    add(&mode_pool_shimmer,     _data_pool_shimmer);
   }
 
   void loop() override {}
