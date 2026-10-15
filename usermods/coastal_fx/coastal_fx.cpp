@@ -11,6 +11,16 @@
  *   Ocean Swell      - rolling blue/teal waves with white-chip whitecaps
  *   Lightning Storm  - dim storm clouds with real-looking multi-flash strikes
  *   Sunrise          - slow dawn (or dusk) fade over 1-64 minutes
+ *   Boom Fireworks   - sound reactive: real bangs launch bursts (mic)
+ *   Pool Shimmer     - sunlight-through-water caustics
+ *   Northern Lights  - aurora curtains over a night sky
+ *   Las Vegas (231-236):
+ *   Vegas Marquee    - casino-sign bulb chaser with a sign's routines (chase, blink, fill, flash)
+ *   Neon Sign        - neon tubes that buzz, stutter on, animate and sometimes flicker
+ *   Jackpot          - slot machine reels spinning and stopping; three of a kind pays out in gold
+ *   Roulette         - a ball racing around a red/black wheel, dropping and settling in a pocket
+ *   Dancing Fountains- a fountain show with choreographed jets (or dancing to the mic)
+ *   Showgirl Sparkle - pink, gold and violet plumes with glittering sequins
  *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
@@ -591,6 +601,630 @@ void mode_northern_lights() {
 const char _data_northern_lights[] PROGMEM =
   "Northern Lights@Speed,Activity,Curtain size,,,Stars;!,!,!;;1;sx=60,ix=120,c1=100,o1=1";
 
+
+// ================================================================ Las Vegas
+// Six effects with a Las Vegas theme (ids 231-236). Each one has its own signature colors, so it
+// looks right the moment it's picked, whatever colors the strip had before. Tick "My colors" to
+// use color slots 1-3 instead (black slots are skipped).
+
+constexpr uint32_t GOLD      = RGBW32(255, 100, 0, 120);    // incandescent marquee bulb
+constexpr uint32_t BULB_HOT  = RGBW32(255, 190, 110, 255);  // a bulb flashing white-hot
+constexpr uint32_t SPARK     = RGBW32(255, 200, 140, 255);  // glitter / spray highlight
+
+// small integer hash: stateless "random" that stays the same for the same input
+inline uint32_t vhash(uint32_t x) {
+  x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+  return x;
+}
+
+// fill out[] with the non-black color slots (if "My colors" is ticked) or the given defaults.
+// Returns how many colors (>= 1).
+uint8_t vegasColors(bool mine, uint32_t out[3], const uint32_t *defs, uint8_t nDefs) {
+  uint8_t n = 0;
+  if (mine) for (uint8_t s = 0; s < 3; s++) if (SEGCOLOR(s)) out[n++] = SEGCOLOR(s);
+  if (n) return n;
+  for (uint8_t k = 0; k < nDefs && k < 3; k++) out[k] = defs[k];
+  return nDefs < 3 ? nDefs : 3;
+}
+
+// draw a soft dot at a fractional position (adds to what's there), wraps around the strip
+void softDot(float x, uint32_t c, int len) {
+  while (x < 0) x += len;
+  while (x >= len) x -= len;
+  const int i = (int)x;
+  const uint8_t f = (uint8_t)((x - i) * 255.0f);
+  SEGMENT.setPixelColor(i, color_blend(SEGMENT.getPixelColor(i), c, 255 - f));
+  const int j = (i + 1) % len;
+  SEGMENT.setPixelColor(j, color_blend(SEGMENT.getPixelColor(j), c, f));
+}
+
+// ---------------------------------------------------------------- Vegas Marquee
+// Casino-sign light bulbs. A classic three-circuit chaser (two bulbs on, one off, rolling along),
+// and with "Show changes" up it runs a sign's routine: chase, chase back, alternate blink,
+// fill-and-empty, flash, and sparkle. "Filament glow" makes the bulbs warm up and cool down
+// like real incandescent bulbs, so the off ones never go quite dark.
+//   Chase speed, Bulb spacing (1 = every pixel is a bulb, up to 1 bulb in 4 pixels),
+//   Show changes (0 = chase only; higher = changes routine more often)
+//   Colors (My colors): 1 = bulbs (default gold), 2 = sign background between bulbs (default dark),
+//   3 = flash (default white-hot)
+struct Marquee { uint32_t sceneStart; uint32_t last; uint8_t scene; };
+
+void mode_vegas_marquee() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(Marquee) + len)) { staticFallback(); return; }
+  Marquee *st = reinterpret_cast<Marquee *>(SEGENV.data);
+  uint8_t *lvl = SEGENV.data + sizeof(Marquee);            // bulb brightness, one per bulb
+  const uint32_t now = strip.now;
+  const bool filament = SEGMENT.check1, mine = SEGMENT.check2;
+  const uint32_t bulb  = mine && SEGCOLOR(0) ? SEGCOLOR(0) : GOLD;
+  const uint32_t bg    = mine ? SEGCOLOR(1) : BLACK;
+  const uint32_t flash = mine && SEGCOLOR(2) ? SEGCOLOR(2) : BULB_HOT;
+  const int cell = 1 + (SEGMENT.intensity >> 6);           // pixels per bulb: 1..4
+  const int nb = (len + cell - 1) / cell;
+
+  if (SEGENV.call == 0) { st->sceneStart = now; st->last = now; st->scene = 0; }
+  const uint32_t stepMs = 420 - (uint32_t)SEGMENT.speed * 3 / 2;  // 420 .. 38 ms per step
+  if (SEGMENT.custom1) {
+    const uint32_t dur = 2500 + (uint32_t)(255 - SEGMENT.custom1) * 50;  // ~15 s .. 2.5 s per routine
+    if (now - st->sceneStart >= dur) { st->sceneStart = now; st->scene = (st->scene + 1) % 6; }
+  } else st->scene = 0;
+  const uint32_t el = now - st->sceneStart;
+  const uint32_t steps = el / stepMs;
+  const uint32_t fillMs = 1200 + stepMs * 10;               // fill / empty sweep time
+
+  uint32_t color = bulb;
+  if (st->scene == 4 && ((steps >> 1) & 1)) color = flash;   // every other flash is white-hot
+
+  // filament: how far a bulb can warm up / cool down since the last frame
+  uint32_t dt = now - st->last;
+  st->last = now;
+  if (dt > 200) dt = 200;
+  const uint16_t up = filament ? (uint16_t)min<uint32_t>(255, dt * 255 / 45 + 1) : 255;
+  const uint16_t down = filament ? (uint16_t)min<uint32_t>(255, dt * 255 / 140 + 1) : 255;
+
+  for (int b = 0; b < nb; b++) {
+    uint8_t target = 0;
+    switch (st->scene) {
+      case 0: target = ((b + 3 - steps % 3) % 3) ? 255 : 0; break;               // chase
+      case 1: target = ((b + steps) % 3) ? 255 : 0; break;                        // chase back
+      case 2: target = ((b + steps / 3) & 1) ? 255 : 0; break;                    // alternate blink
+      case 3: {                                                                   // fill, then empty
+        const uint32_t p = el % (2 * fillMs);
+        const int edge = (int)((uint64_t)(p % fillMs) * (nb + 1) / fillMs);
+        target = (p < fillMs) == (b < edge) ? 255 : 0;
+        break;
+      }
+      case 4: target = (steps & 1) ? 0 : 255; break;                              // flash
+      default: {                                                                  // sparkle
+        const uint32_t h = vhash(b * 2654435761u + (now / (stepMs + 40)) * 40503u);
+        target = (h & 0xFF) < 40 ? 255 : 120;
+        break;
+      }
+    }
+    uint8_t &l = lvl[b];
+    if (l < target) l = (target - l > up) ? l + up : target;
+    else if (l > target) l = (l - target > down) ? l - down : target;
+  }
+
+  // a bulb that's off still glows faintly with filament on
+  const uint32_t offC = filament ? color_add(bg, color_fade(color, 14, true)) : bg;
+  for (int i = 0; i < len; i++) {
+    if (i % cell) { SEGMENT.setPixelColor(i, bg); continue; }
+    const uint8_t l = lvl[i / cell];
+    // incandescent light rises faster than linear with filament heat
+    const uint8_t k = filament ? (uint8_t)(((uint16_t)l * l + 255) >> 8) : l;
+    SEGMENT.setPixelColor(i, color_blend(offC, color, k));
+  }
+}
+const char _data_vegas_marquee[] PROGMEM =
+  "Vegas Marquee@Chase speed,Bulb spacing,Show changes,,,Filament glow,My colors;Bulbs,Background,Flash;;1;"
+  "sx=150,ix=64,c1=160,o1=1,o2=0";
+
+// ---------------------------------------------------------------- Neon Sign
+// A row of neon tubes in classic sign colors with the faint buzz of real neon. When the effect
+// starts the tubes stutter on one at a time. With Animation up it runs like an animated sign:
+// tubes light one after another, hold, blink three times, go dark, repeat (0 = always on).
+// "Faulty tubes" now and then makes one tube flicker like it's on its way out.
+//   Animation, Tube length (4-35 pixels, 1 dark pixel between tubes), Faulty tubes
+//   Colors (My colors): tubes cycle through slots 1-3. Default: pink, blue, red-orange, lime,
+//   violet, turquoise
+void mode_neon_sign() {
+  const int len = SEGLEN;
+  if (len < 1) { staticFallback(); return; }
+  static const uint32_t NEON[6] = {
+    RGBW32(255, 0, 70, 0),    // hot pink
+    RGBW32(0, 80, 255, 0),    // electric blue
+    RGBW32(255, 30, 0, 0),    // neon red-orange (the real neon gas color)
+    RGBW32(90, 255, 0, 0),    // lime
+    RGBW32(150, 0, 255, 0),   // violet
+    RGBW32(0, 255, 150, 0),   // turquoise
+  };
+  uint32_t mineCols[3];
+  uint8_t n = 0;
+  if (SEGMENT.check1) for (uint8_t s = 0; s < 3; s++) if (SEGCOLOR(s)) mineCols[n++] = SEGCOLOR(s);
+  const uint32_t *cols = n ? mineCols : NEON;
+  if (!n) n = 6;
+
+  const uint32_t now = strip.now;
+  if (SEGENV.call == 0) SEGENV.step = now;                  // power-on time
+  const uint32_t on = now - SEGENV.step;
+  const int tl = 4 + (SEGMENT.intensity >> 3);              // tube length 4..35
+  const int pitch = tl + 1;
+  const int nt = (len + pitch - 1) / pitch;
+
+  // animated sign: build (5u), hold (6u), blink x3 (3u), dark (1u)
+  int lit = nt;                 // tubes 0..lit-1 are on
+  bool all = true;              // whole sign on (false while blinking off or dark)
+  int igniting = -1;            // tube just switched on: stutters
+  uint32_t ignAge = 0;
+  if (SEGMENT.speed) {
+    const uint32_t u = 1300 - (uint32_t)SEGMENT.speed * 9 / 2;   // 1300 .. 152 ms
+    const uint32_t ph = on % (15 * u);
+    if (ph < 5 * u) {
+      const uint32_t per = 5 * u / nt + 1;
+      lit = ph / per + 1;
+      igniting = lit - 1;
+      ignAge = ph % per;
+    } else if (ph < 11 * u) {
+      // hold
+    } else if (ph < 14 * u) {
+      all = ((ph - 11 * u) / (u / 2)) % 2 == 0;
+    } else {
+      all = false;
+    }
+  }
+
+  // which tube is faulty right now (changes every 4 s, only some windows have a fault)
+  const uint32_t win = now / 4000;
+  const uint32_t wh = vhash(win * 7919u + SEGENV.step);
+  const bool faultNow = SEGMENT.custom1 && (wh & 0xFF) < SEGMENT.custom1 && (now % 4000) < 300 + ((wh >> 8) & 0x7FF);
+  const int faulty = faultNow ? (int)((wh >> 20) % nt) : -1;
+
+  for (int i = 0; i < len; i++) {
+    const int t = i / pitch, p = i % pitch;
+    if (p == tl) { SEGMENT.setPixelColor(i, BLACK); continue; }    // gap between tubes
+    uint8_t bri = 0;
+    if (all && t < lit) {
+      bri = 224 + (perlin8(t * 211 + p * 9, now >> 1) >> 3);        // gentle buzz: 224..255
+      // power-on: each tube stutters on after its own small delay
+      const uint32_t delay = 120 + vhash(t + 17) % 1300;
+      if (on < delay) bri = 0;
+      else if (on < delay + 260 && (vhash((on / 33) * 31 + t) & 3) == 0) bri = 0;
+      // the tube the animation just lit stutters on too
+      if (t == igniting && ignAge < 220 && (vhash((on / 30) * 17 + t) & 1)) bri = 0;
+      // failing tube: rapid irregular flicker, dimmer when it does light
+      if (t == faulty) {
+        const uint8_t h = vhash((now / 28) * 131 + t) & 7;
+        bri = h < 3 ? 0 : (h < 5 ? 70 : 200);
+      }
+    }
+    if (!bri) { SEGMENT.setPixelColor(i, BLACK); continue; }
+    // the ends of a tube (electrodes) glow a little less
+    if (p == 0 || p == tl - 1) bri = sc8(bri, 175);
+    SEGMENT.setPixelColor(i, color_fade(cols[t % n], bri, true));
+  }
+}
+const char _data_neon_sign[] PROGMEM =
+  "Neon Sign@Animation,Tube length,Faulty tubes,,,My colors;!,!,!;;1;sx=90,ix=96,c1=60,o1=0";
+
+// ---------------------------------------------------------------- Jackpot
+// A slot machine. The strip is split into reels (3 by default) showing colored symbols: cherry
+// red, orange, plum, emerald, sapphire and a white BAR. All reels spin, then stop one after
+// another with a little bounce. Three of a kind is a jackpot: the machine strobes gold, then
+// gold lights chase along the whole strip with a shower of sparkling coins. Otherwise it holds
+// the result for a moment (center symbols bright, the rest dim) and spins again.
+//   Pace, Jackpot odds (0 = about 1 spin in 30, max = most spins), Reels (3-7)
+struct Reel { float p0, pf; uint32_t stop; };
+struct SlotGame { uint32_t start, end; uint8_t nr, win; uint8_t sym[8]; Reel reel[8]; };
+constexpr uint8_t NSYM = 6;
+const uint32_t SYMBOLS[NSYM] = {
+  RGBW32(255, 0, 10, 0),     // cherry
+  RGBW32(255, 85, 0, 0),     // orange
+  RGBW32(150, 0, 255, 0),    // plum
+  RGBW32(0, 220, 30, 0),     // emerald
+  RGBW32(0, 60, 255, 0),     // sapphire
+  RGBW32(40, 40, 40, 255),   // BAR (white chip)
+};
+// symbol order on reel r: a different shuffle per reel
+inline uint8_t reelSym(uint8_t r, int k) { return (uint8_t)((k * 5 + r * 2) % NSYM); }
+
+void mode_jackpot() {
+  const int len = SEGLEN;
+  if (len < 4 || !SEGENV.allocateData(sizeof(SlotGame))) { staticFallback(); return; }
+  SlotGame *g = reinterpret_cast<SlotGame *>(SEGENV.data);
+  const uint32_t now = strip.now;
+  int nr = 3 + ((SEGMENT.custom1 * 5) >> 8);               // reels 3..7
+  if (nr > len / 4) nr = len / 4;
+  if (nr < 1) nr = 1;
+  const int L = len / nr - (nr > 1 ? 1 : 0);                // pixels per reel window (1-pixel frame between)
+  const int s = max(2, (L + 1) / 3);                        // pixels per symbol: 3 symbols in view
+  const float C = (float)s * NSYM;                          // one turn of the reel, in pixels
+  const float v = s * (8.0f + SEGMENT.speed / 32.0f) / 1000.0f;  // spin speed, pixels per ms
+  const uint32_t A = 300, D = 450;                          // spin-up and slow-down times, ms
+
+  // ---- new round
+  if (SEGENV.call == 0 || g->nr != nr || (int32_t)(now - g->end) >= 0) {
+    const bool fresh = SEGENV.call == 0 || g->nr != nr;
+    g->nr = nr;
+    g->start = now;
+    const uint8_t odds = 8 + ((SEGMENT.intensity * 3) >> 2);   // chance out of 256: 8..199
+    g->win = hw_random8() < odds;
+    if (g->win) {
+      const uint8_t sy = hw_random8(NSYM);
+      for (int r = 0; r < nr; r++) g->sym[r] = sy;
+    } else {
+      for (int r = 0; r < nr; r++) g->sym[r] = hw_random8(NSYM);
+      if (hw_random8() < 100) for (int r = 1; r < nr - 1; r++) g->sym[r] = g->sym[0];   // near miss
+      bool same = nr > 1;
+      for (int r = 1; r < nr; r++) if (g->sym[r] != g->sym[0]) same = false;
+      if (same) g->sym[nr - 1] = (g->sym[0] + 1 + hw_random8(NSYM - 1)) % NSYM;      // not a win
+    }
+    uint32_t prevStop = 0;
+    for (int r = 0; r < nr; r++) {
+      Reel &rl = g->reel[r];
+      // where the result symbol sits centered in the window
+      int k = 0;
+      while (reelSym(r, k) != g->sym[r]) k++;
+      float pf = (float)(k * s + s / 2 - L / 2);
+      while (pf < 0) pf += C;
+      rl.p0 = fresh ? (float)((hw_random8(NSYM) * s + s / 2 - L / 2 + (int)C * 2) % (int)C) : rl.pf;
+      rl.pf = pf;
+      // nominal stop time, then nudged later so the reel lands exactly on its symbol
+      const uint32_t base = 1600 - SEGMENT.speed * 3;            // 1600 .. 835 ms
+      const uint32_t stagger = 650 - (SEGMENT.speed * 3) / 2;    // 650 .. 268 ms
+      const uint32_t nom = r == 0 ? base : prevStop + stagger;
+      const float dNom = v * (nom - A / 2.0f - D / 2.0f);
+      float need = fmodf(pf - rl.p0, C); if (need < 0) need += C;
+      float extra = fmodf(need - dNom, C); if (extra < 0) extra += C;
+      rl.stop = nom + (uint32_t)(extra / v);
+      prevStop = rl.stop;
+    }
+    g->end = now + prevStop + 400 + (g->win ? 5600 : 1500);
+  }
+
+  const uint32_t t = now - g->start;
+  const uint32_t settled = g->reel[nr - 1].stop + 400;
+  const bool done = t >= settled;
+  const uint32_t after = done ? t - settled : 0;
+  const bool jackpot = done && g->win;
+  const uint32_t frame = jackpot && after < 1400 && (after / 70) % 2 == 0 ? GOLD : RGBW32(40, 22, 0, 12);
+
+  for (int r = 0; r < nr; r++) {
+    const Reel &rl = g->reel[r];
+    float p;
+    if (t < A) p = rl.p0 + v * t * t / (2.0f * A);
+    else if (t + D < rl.stop) p = rl.p0 + v * (A / 2.0f) + v * (t - A);
+    else if (t < rl.stop) {
+      const float x = (float)(t - (rl.stop - D)) / D;
+      p = rl.p0 + v * (A / 2.0f) + v * (rl.stop - D - A) + v * D * (x - x * x / 2.0f);
+    } else {
+      const float a = (float)(t - rl.stop);                       // bounce: a little past, then back
+      p = rl.pf + (a < 600 ? 0.15f * s * sinf(a * 0.022f) * expf(-a * 0.009f) : 0.0f);
+    }
+    const bool spinning = t < rl.stop;
+    const int x0 = r * (L + 1);
+    float xc = fmodf(L / 2 + p + 0.5f, C);                       // which symbol is on the payline
+    if (xc < 0) xc += C;
+    const int kc = (int)(xc / s);
+    for (int j = 0; j < L && x0 + j < len; j++) {
+      float x = fmodf(j + p + 0.5f, C);
+      if (x < 0) x += C;
+      const int k = (int)(x / s);
+      const float in = x - k * s;
+      uint32_t c = SYMBOLS[reelSym(r, k)];
+      if (s >= 4 && in >= s - 1) c = BLACK;                     // gap between symbols
+      else if (spinning) c = color_fade(c, 200, true);           // motion blur look
+      if (done) {
+        const bool center = k == kc;
+        if (!center) c = color_fade(c, jackpot ? 40 : 70, true);  // the rest dims: the payline shows
+        else if (!jackpot) c = color_fade(c, 190 + (sin8_t(after >> 2) >> 2), true);
+      }
+      SEGMENT.setPixelColor(x0 + j, c);
+    }
+    if (nr > 1 && r < nr - 1 && x0 + L < len) SEGMENT.setPixelColor(x0 + L, frame);
+  }
+  for (int i = nr * (L + 1) - (nr > 1 ? 1 : 0); i < len; i++) SEGMENT.setPixelColor(i, frame);  // leftover pixels
+
+  // jackpot: strobe, then a gold chase over everything with sparkling coins
+  if (jackpot) {
+    if (after < 1400) {
+      if ((after / 70) % 2 == 0) for (int i = 0; i < len; i++) SEGMENT.setPixelColor(i, color_blend(SEGMENT.getPixelColor(i), BULB_HOT, 150));
+    } else {
+      const uint32_t chase = (after / 60) % 3;
+      const uint8_t fade = after > 5000 ? (uint8_t)min<uint32_t>(255, (after - 5000) * 255 / 600) : 0;
+      for (int i = 0; i < len; i++) {
+        uint32_t c = SEGMENT.getPixelColor(i);
+        if ((i + chase) % 3 == 0) c = color_blend(c, GOLD, 255 - fade);
+        const uint32_t h = vhash(i * 977u + (after / 45) * 7151u);
+        if ((h & 0xFF) < 12) c = color_blend(c, SPARK, 255 - fade);  // coins
+        SEGMENT.setPixelColor(i, c);
+      }
+    }
+  }
+}
+const char _data_jackpot[] PROGMEM = "Jackpot@Pace,Jackpot odds,Reels;;;1;sx=128,ix=60,c1=0";
+
+// ---------------------------------------------------------------- Roulette
+// A roulette wheel along the strip: red and black pockets with a green zero every 37 pockets,
+// turning one way while a white ball races the other way. The ball slows, drops, rattles across
+// a few pockets and settles. The winning pocket flashes and every pocket of the winning color
+// lights up, then the croupier spins again.
+//   Spin speed, Pocket size (2-9 pixels)
+//   Colors (My colors): 1 = red pockets, 2 = black pockets, 3 = zero. Defaults red, dark, green.
+struct Wheel { uint32_t start; float b0, w0, vb0, tDrop, bDrop, target; uint16_t win; uint8_t phase; };
+
+void mode_roulette() {
+  const int len = SEGLEN;
+  if (len < 6 || !SEGENV.allocateData(sizeof(Wheel))) { staticFallback(); return; }
+  Wheel *w = reinterpret_cast<Wheel *>(SEGENV.data);
+  const uint32_t now = strip.now;
+  const bool mine = SEGMENT.check1;
+  const uint32_t red  = mine && SEGCOLOR(0) ? SEGCOLOR(0) : RGBW32(255, 0, 0, 0);
+  const uint32_t blk  = mine ? SEGCOLOR(1) : BLACK;
+  const uint32_t zero = mine && SEGCOLOR(2) ? SEGCOLOR(2) : RGBW32(0, 200, 30, 0);
+  const uint32_t BALL = RGBW32(200, 200, 200, 255);
+  int pw = 2 + (SEGMENT.intensity >> 5);                     // pocket width 2..9
+  if (pw > len / 3) pw = max(1, len / 3);
+  const int np = len / pw;                                   // pockets on the wheel
+  const float W = (float)np * pw;                            // wheel circumference, pixels
+  const float tauB = 2200.0f, tauW = 5000.0f;                // how quickly ball and wheel slow (ms)
+  const float vDrop = pw * 0.006f + 0.02f;                   // ball drops below this speed (px/ms)
+  const float settleMs = 1300.0f, showMs = 2800.0f;
+
+  if (SEGENV.call == 0 || w->vb0 <= 0) {
+    w->b0 = hw_random16(len); w->w0 = 0; w->phase = 2; w->start = now - 100000; w->tDrop = 0;
+  }
+  float t = (float)(now - w->start);
+  // ball and wheel, both slowing exponentially (wheel turns backwards, slowly)
+  auto wheelAt = [&](float tt) { return w->w0 - w->vb0 * 0.18f * tauW * (1.0f - expf(-tt / tauW)); };
+  if (w->phase == 2 && t > w->tDrop + settleMs + showMs) {
+    // new spin: start from where the ball and wheel are now
+    const float wNow = wheelAt(t);
+    float bNow = w->phase == 2 && w->vb0 > 0 ? w->target + wNow : w->b0;
+    w->w0 = fmodf(wNow, W); if (w->w0 < 0) w->w0 += W;
+    w->b0 = fmodf(bNow, (float)len); if (w->b0 < 0) w->b0 += len;
+    w->vb0 = max(0.12f, len * 0.0011f) * (0.55f + SEGMENT.speed / 300.0f);   // px per ms
+    w->start = now; t = 0;
+    w->tDrop = tauB * logf(w->vb0 / vDrop);
+    if (w->tDrop < 1200) w->tDrop = 1200;
+    w->phase = 0;
+  }
+  const float wNow = wheelAt(t);
+  float ball;            // screen position of the ball
+  float ballV = 0;       // ball speed, for its tail
+  if (w->phase == 0 && t < w->tDrop) {
+    ball = w->b0 + w->vb0 * tauB * (1.0f - expf(-t / tauB));
+    ballV = w->vb0 * expf(-t / tauB);
+  } else {
+    if (w->phase == 0) {
+      // the drop: note where the ball is on the wheel and pick its pocket a few hops ahead
+      const float bScreen = w->b0 + w->vb0 * tauB * (1.0f - expf(-w->tDrop / tauB));
+      float bw = fmodf(bScreen - wheelAt(w->tDrop), W); if (bw < 0) bw += W;
+      w->bDrop = bw;
+      int k = ((int)(bw / pw) + 1 + hw_random8(3)) % np;
+      w->win = k;
+      w->target = k * pw + pw / 2.0f;
+      if (w->target < bw) w->target += W;    // keep moving forward
+      w->phase = 1;
+    }
+    const float a = t - w->tDrop;
+    float bw;
+    if (a < settleMs) {
+      // rattle: hops over the pockets toward the target, bouncing back and forth, dying out
+      const float x = a / settleMs;
+      const float ease = 1.0f - (1.0f - x) * (1.0f - x);
+      const float bounce = (w->target - w->bDrop) * 0.35f * cosf(a * 0.02f) * expf(-a * 0.004f);
+      bw = w->bDrop + (w->target - w->bDrop) * ease + bounce * (1.0f - x);
+    } else {
+      bw = w->target;
+      w->phase = 2;
+    }
+    ball = bw + wNow;
+  }
+
+  // draw the wheel
+  const bool show = w->phase == 2;
+  const uint8_t winKind = (w->win % 37 == 0) ? 0 : ((w->win & 1) ? 1 : 2);   // 0 zero, 1 red, 2 black
+  const float showT = t - w->tDrop - settleMs;
+  for (int i = 0; i < len; i++) {
+    float xw = fmodf(i + 0.5f - wNow, W); if (xw < 0) xw += W;
+    const int k = (int)(xw / pw) % np;
+    const uint8_t kind = (k % 37 == 0) ? 0 : ((k & 1) ? 1 : 2);
+    uint32_t c = kind == 0 ? zero : (kind == 1 ? red : blk);
+    uint8_t bri = 150;
+    if (show) {
+      bri = kind == winKind ? 255 : 70;
+      if (k == w->win) bri = ((uint32_t)showT / 220) % 2 ? 255 : 90;   // winning pocket flashes
+      if (k == w->win && kind == 2 && !blk) c = RGBW32(60, 60, 60, 60); // a black win still shows
+    }
+    if (pw >= 4 && (int)xw % pw == pw - 1) bri >>= 2;                   // pocket dividers
+    SEGMENT.setPixelColor(i, color_fade(c, bri, true));
+  }
+  // the ball, with a short tail while it's racing
+  if (ballV > 0.05f) {
+    const int tail = min(6, (int)(ballV * 25));
+    for (int k = tail; k >= 1; k--) softDot(ball - k, color_fade(BALL, 200 - k * 30, true), len);
+  }
+  softDot(ball, BALL, len);
+}
+const char _data_roulette[] PROGMEM =
+  "Roulette@Spin speed,Pocket size,,,,My colors;Red,Black,Zero;;1;sx=128,ix=64,o1=0";
+
+// ---------------------------------------------------------------- Dancing Fountains
+// Rows of water jets doing a fountain show: waves rolling down the line, everything bursting
+// together, call-and-response, rapid "shooters" one after another, and a big finale. Each jet
+// leaps and falls with gravity and leaves a mist behind; the crowns sparkle. With "Dance to
+// music" ticked (needs the mic / AudioReactive) every jet follows its own slice of the music.
+//   Tempo, Jets (fewer/more), Jet height
+//   Colors (My colors): 1 = water (default icy white), 2 = underwater lights (default blue)
+struct Jet { float h, v; };
+constexpr uint8_t MAX_JETS = 48;
+
+void mode_dancing_fountains() {
+  const int len = SEGLEN;
+  if (len < 3 || !SEGENV.allocateData(sizeof(Jet) * MAX_JETS + sizeof(uint32_t))) { staticFallback(); return; }
+  Jet *jets = reinterpret_cast<Jet *>(SEGENV.data);
+  uint32_t *last = reinterpret_cast<uint32_t *>(SEGENV.data + sizeof(Jet) * MAX_JETS);
+  const uint32_t now = strip.now;
+  static const uint32_t DEF[2] = { RGBW32(120, 190, 255, 200), RGBW32(0, 40, 255, 0) };
+  uint32_t cols[3];
+  const uint8_t nc = vegasColors(SEGMENT.check2, cols, DEF, 2);
+  const uint32_t water = cols[0], light = nc > 1 ? cols[1] : DEF[1];
+
+  const int spacing = 10 + (255 - SEGMENT.intensity) / 6;   // pixels per jet: 10..52
+  const int nj = constrain(len / spacing, 1, (int)MAX_JETS);
+  const float span = (float)len / nj;
+  const float hMax = span * (0.2f + 0.3f * SEGMENT.custom1 / 255.0f);   // reach either side
+  const uint32_t beatMs = 120000UL / (120 + SEGMENT.speed);  // 60..160 beats a minute
+  const float bpm = 60000.0f / beatMs;
+  const float g = 4.0f * (bpm / 90.0f) * (bpm / 90.0f) / 1e6f;   // gravity, height per ms^2
+  const auto shoot = [&](Jet &j, float h) { if (j.h < h) j.v = sqrtf(2.0f * g * (h - j.h)) ; };
+
+  if (SEGENV.call == 0) { SEGMENT.fill(BLACK); *last = now; }
+  uint32_t dtMs = now - *last;
+  *last = now;
+  if (dtMs > 100) dtMs = 100;
+  const float dt = (float)dtMs;
+
+  // ---- music
+  um_data_t *um = nullptr;
+  const uint8_t *fft = nullptr;
+  if (SEGMENT.check1 && UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) && um && um->u_size >= 3)
+    fft = (const uint8_t *)um->u_data[2];
+
+  // ---- choreography: 5 routines of 8 beats each (integer clock: stays smooth after weeks)
+  const uint32_t beat = now / beatMs;
+  const float beats = (beat % 64) + (float)(now % beatMs) / beatMs;   // wraps every 64 beats
+  const uint8_t routine = (beat / 8) % 5;
+  const bool onBeat = beat != (now - dtMs) / beatMs;
+  const uint32_t halfMs = beatMs / 2;
+  const uint32_t half = now / halfMs;
+  const bool onHalf = half != (now - dtMs) / halfMs;
+
+  for (int j = 0; j < nj; j++) {
+    Jet &jt = jets[j];
+    if (fft) {
+      const uint8_t band = 1 + (j * 13) / max(1, nj - 1);     // bands 1..14
+      const float lv = fft[min((int)band, 15)] / 255.0f;
+      const float target = (lv - 0.06f) * 1.4f;                // quiet bands stay down
+      if (target > jt.h + 0.05f) shoot(jt, min(1.0f, target));
+    } else switch (routine) {
+      case 0: {   // wave rolling down the line
+        const float ph = beats * 0.5f - j * 0.15f;           // each jet a bit behind the last
+        const float target = 0.15f + 0.8f * (0.5f + 0.5f * sinf(ph * 6.2832f));
+        jt.h += (target - jt.h) * min(1.0f, dt / 120.0f); jt.v = 0;
+        break;
+      }
+      case 1:     // everything together on the beat
+        if (onBeat) shoot(jt, (beat & 3) == 3 ? 1.0f : 0.7f);
+        break;
+      case 2:     // call and response
+        if (onBeat && (int)((beat + j) & 1)) shoot(jt, 0.85f);
+        break;
+      case 3:     // shooters running down the line, two per beat
+        if (onHalf && (int)(half % nj) == j) shoot(jt, 1.0f);
+        if (onHalf && nj > 6 && (int)((half + nj / 2) % nj) == j) shoot(jt, 1.0f);
+        break;
+      default: {  // finale: rising ripples, then everything to the top
+        const uint32_t b = beat % 8;
+        if (b < 6) { if (onBeat) shoot(jt, 0.3f + b * 0.11f + ((j & 1) ? 0.05f : 0)); }
+        else if (jt.v <= 0 && jt.h < 0.9f) shoot(jt, 1.0f);
+        break;
+      }
+    }
+    // gravity
+    if (!(routine == 0 && !fft)) {
+      jt.h += jt.v * dt - 0.5f * g * dt * dt;
+      jt.v -= g * dt;
+      if (jt.h <= 0) { jt.h = 0; jt.v = 0; }
+      if (jt.h > 1.05f) { jt.h = 1.05f; if (jt.v > 0) jt.v = 0; }
+    }
+  }
+
+  // ---- draw: mist fades, jets drawn on top
+  SEGMENT.fadeToBlackBy(28);
+  for (int j = 0; j < nj; j++) {
+    const Jet &jt = jets[j];
+    if (jt.h <= 0.01f) continue;
+    const float c = (j + 0.5f) * span;
+    const float r = jt.h * hMax + 0.6f;
+    const int lo = max(0, (int)(c - r - 1)), hi = min(len - 1, (int)(c + r + 1));
+    for (int i = lo; i <= hi; i++) {
+      const float d = fabsf(i + 0.5f - c);
+      if (d > r + 0.5f) continue;
+      const float x = d / r;                                  // 0 at the jet, 1 at the spray edge
+      // lit from below at the base, white water higher up, brightest foam at the crown
+      uint32_t px = color_blend(light, water, (uint8_t)min(255.0f, 90 + x * 200));
+      uint8_t bri = (uint8_t)(110 + 145 * x);
+      if (d > r - 0.5f) bri = (uint8_t)(bri * max(0.0f, (r + 0.5f - d)));   // soft edge
+      if (jt.v < 0) bri = (uint8_t)(bri * (0.65f + 0.35f * jt.h));           // falling water thins
+      px = color_fade(px, bri, true);
+      if (x > 0.7f && (vhash(i * 7919u + (now / 40) * 104729u) & 0xFF) < 70) px = color_blend(px, SPARK, 180);
+      // keep the brighter of mist and jet
+      const uint32_t old = SEGMENT.getPixelColor(i);
+      const auto lum = [](uint32_t q) { return ((q >> 16) & 0xFF) + ((q >> 8) & 0xFF) + (q & 0xFF) + ((q >> 24) & 0xFF) * 2; };
+      SEGMENT.setPixelColor(i, lum(px) >= lum(old) ? px : old);
+    }
+  }
+}
+const char _data_dancing_fountains[] PROGMEM =
+  "Dancing Fountains@Tempo,Jets,Jet height,,,Dance to music,My colors;Water,Lights;;1f;"
+  "sx=110,ix=140,c1=200,o1=0,o2=0";
+
+// ---------------------------------------------------------------- Showgirl Sparkle
+// Feathers and sequins: soft plumes of pink, gold and violet sway along the strip while
+// sequins catch the light and glint. Every few seconds a "spotlight" sweeps across and the
+// sequins it passes flash in a wave.
+//   Shimmer (speed), Sequins (how many), Feather size
+//   Colors (My colors): the plume colors. Default hot pink, gold, violet.
+void mode_showgirl_sparkle() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(len + sizeof(uint32_t))) { staticFallback(); return; }
+  uint32_t *last = reinterpret_cast<uint32_t *>(SEGENV.data);
+  uint8_t *spark = SEGENV.data + sizeof(uint32_t);
+  const uint32_t now = strip.now;
+  static const uint32_t DEF[3] = { RGBW32(255, 0, 110, 0), RGBW32(255, 110, 0, 90), RGBW32(130, 0, 255, 0) };
+  uint32_t cols[3];
+  const uint8_t n = vegasColors(SEGMENT.check1, cols, DEF, 3);
+
+  if (SEGENV.call == 0) *last = now;
+  const uint32_t t = (uint32_t)now * (SEGMENT.speed + 16) >> 8;
+  const uint16_t cell = 8 + (SEGMENT.custom1 >> 2);          // pixels per plume: 8..71
+  const uint16_t step = 256 / cell;                          // noise units per pixel
+
+  // sweeping spotlight: crosses the strip, then rests
+  const uint32_t sweepMs = 2600 - SEGMENT.speed * 6;          // 2600 .. 1070 ms to cross
+  const uint32_t cyc = now % (sweepMs * 3);
+  const float spot = cyc < sweepMs ? (float)cyc / sweepMs * (len + 20) - 10 : -1000.0f;
+
+  // sequins: decay and spawn ~60 times a second
+  if (now - *last >= 16) {
+    const uint8_t decay = 10 + (SEGMENT.speed >> 3);
+    *last = now;
+    for (int i = 0; i < len; i++) {
+      spark[i] = spark[i] > decay ? spark[i] - decay : 0;
+      int chance = 1 + (SEGMENT.intensity >> 4);                // per 1024
+      if (fabsf(i - spot) < 4) chance += 120;
+      if ((int)(vhash(i * 2246822519u + now * 3266489917u) & 1023) < chance) spark[i] = 255;
+    }
+  }
+
+  for (int i = 0; i < len; i++) {
+    // plume color: noise picks a spot along the color list, blending smoothly
+    const uint8_t nz = perlin8(i * step + (t >> 2), t >> 3);
+    const uint16_t pos = ((uint32_t)nz * n * 2 + (t >> 5)) % (n * 256);   // drifts through all the colors
+    const uint8_t a = (pos >> 8) % n, f = pos & 0xFF;
+    uint32_t c = n == 1 ? cols[0] : color_blend(cols[a], cols[(a + 1) % n], f);
+    // feathers ripple in brightness
+    const uint8_t br = 110 + (perlin8(i * step * 3 + 9000, (t >> 1) + 4000) >> 1);
+    c = color_fade(c, br, true);
+    if (spark[i]) c = color_blend(c, SPARK, spark[i]);
+    SEGMENT.setPixelColor(i, c);
+  }
+}
+const char _data_showgirl_sparkle[] PROGMEM =
+  "Showgirl Sparkle@Shimmer,Sequins,Feather size,,,My colors;!,!,!;;1;sx=96,ix=128,c1=100,o1=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -619,6 +1253,13 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_boom_fireworks,   _data_boom_fireworks);   // new effects go at the end so ids don't shift
     add(&mode_pool_shimmer,     _data_pool_shimmer);
     add(&mode_northern_lights,  _data_northern_lights);
+    // Las Vegas (231-236)
+    add(&mode_vegas_marquee,     _data_vegas_marquee);
+    add(&mode_neon_sign,         _data_neon_sign);
+    add(&mode_jackpot,           _data_jackpot);
+    add(&mode_roulette,          _data_roulette);
+    add(&mode_dancing_fountains, _data_dancing_fountains);
+    add(&mode_showgirl_sparkle,  _data_showgirl_sparkle);
   }
 
   void loop() override {}

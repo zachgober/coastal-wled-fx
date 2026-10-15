@@ -1,6 +1,6 @@
 # Coastal FX — custom WLED effects
 
-Eight custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+Seventeen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
 
 | Effect | What it does | Controls |
 |---|---|---|
@@ -16,11 +16,27 @@ Eight custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps 
 | Pool Shimmer | Sunlight-through-water caustics: thin bright ribbons drifting and crossing over pool blue | Speed, Sparkle, Ripple size, Warm sun |
 | Northern Lights | Aurora curtains folding over a night sky: green cores, purple fringes, fine rays, slow surges | Speed, Activity, Curtain size, Stars |
 
+### Las Vegas (ids 231–236)
+
+![Vegas effects](effect-preview-vegas.gif)
+
+| Effect | What it does | Controls |
+|---|---|---|
+| Vegas Marquee | Casino-sign bulbs: a three-circuit chaser (two on, one off), and with Show changes up it runs a sign's routine — chase, chase back, alternate blink, fill and empty, flash, sparkle. Filament glow makes bulbs warm up and cool down like real incandescents | Chase speed, Bulb spacing, Show changes (0 = chase only), Filament glow, My colors (1 bulbs, 2 background, 3 flash) |
+| Neon Sign | Neon tubes in pink, blue, red-orange, lime, violet and turquoise with a faint buzz. They stutter on at start; Animation lights them one by one, holds, blinks three times and goes dark like an animated sign. Faulty tubes flicker now and then | Animation (0 = always on), Tube length, Faulty tubes, My colors |
+| Jackpot | Slot machine: the strip becomes reels of colored symbols that spin and stop one after another with a bounce. Three of a kind strobes gold, then gold chases the whole strip with sparkling coins | Pace, Jackpot odds, Reels (3–7) |
+| Roulette | Red and black pockets (green zero every 37) turning one way while a white ball races the other, slows, rattles over a few pockets and settles. The winning pocket flashes and its color lights up | Spin speed, Pocket size, My colors (1 red, 2 black, 3 zero) |
+| Dancing Fountains 🎵 | A fountain show: rolling waves, bursts together, call-and-response, rapid shooters and a finale. Jets leap and fall with gravity, leave mist and sparkle at the crown. *Dance to music* makes each jet follow its own slice of the music (mic) | Tempo, Jets, Jet height, Dance to music, My colors (1 water, 2 lights) |
+| Showgirl Sparkle | Soft plumes of hot pink, gold and violet swaying along the strip, covered in glinting sequins; a spotlight sweeps across now and then and the sequins flash in a wave | Shimmer, Sequins, Feather size, My colors |
+
+The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
+the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
+
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–230** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-230" when the firmware is running.
+Effect IDs on this build: **220–236** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-236" when the firmware is running.
 
 ## Build (GitHub, no software to install)
 
@@ -44,12 +60,14 @@ Effect IDs on this build: **220–230** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-230".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-236".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–44) plus the existing ones. This replaces the board's preset list,
-   so if you've saved new presets since, merge them first.
+   for the holiday presets (30–46), the Vegas scenes (70–77) and the *Vegas Night* playlist (79),
+   plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
+   since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
+   Lights → the strip → Scenes → **Add Vegas scenes**.)
 
 ## Changing an effect
 
