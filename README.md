@@ -1,6 +1,10 @@
 # Coastal FX — custom WLED effects
 
-Seventeen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+Eighteen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+
+**Direction:** everything that travels (bulbs, stripes, waves, chases, reels, candy) moves from the
+segment's first pixel toward its last, the same way WLED's own chases run. To make a strip run the
+other way, tick **Reversed** for its output in Config → LED Preferences.
 
 | Effect | What it does | Controls |
 |---|---|---|
@@ -29,14 +33,31 @@ Seventeen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (ke
 | Dancing Fountains 🎵 | A fountain show: rolling waves, bursts together, call-and-response, rapid shooters and a finale. Jets leap and fall with gravity, leave mist and sparkle at the crown. *Dance to music* makes each jet follow its own slice of the music (mic) | Tempo, Jets, Jet height, Dance to music, My colors (1 water, 2 lights) |
 | Showgirl Sparkle | Soft plumes of hot pink, gold and violet swaying along the strip, covered in glinting sequins; a spotlight sweeps across now and then and the sequins flash in a wave | Shimmer, Sequins, Feather size, My colors |
 
+### Candy Land (id 237)
+
+![Candy Land](effect-preview-candy-land.png)
+
+*Time runs down, pixels across: Candy Path, Gumdrop Pop, Lollipop Swirl, Tour.*
+
+| Look (slider) | What it does |
+|---|---|
+| Candy Path (0–63) | Game-board spaces: 3 candy pixels (cherry, tangerine, lemon, lime, blueberry, grape) and a white frosting pixel, hopping one space at a time along the strip |
+| Gumdrop Pop (64–127) | Soft pastel frosting drifting along while bright gumdrops pop up in random spots, flash white in the middle and melt away |
+| Lollipop Swirl (128–191) | Stripes of 2 candy pixels and 1 frosting pixel drifting along and swaying back and forth |
+| Tour (192–255, default) | The three in turn, 15 seconds each, with a short fade between |
+
+Controls: Speed, **Sprinkles** (sugar glints on the candy, candy sprinkles on the frosting), Look,
+**My colors** (candy colors from slots 1–3). The frosting is the warm-white chip. Speed changes are
+smooth: the effect keeps its own clock, so it never jumps.
+
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–236** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-236" when the firmware is running.
+Effect IDs on this build: **220–237** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-237" when the firmware is running.
 
 ## Build (GitHub, no software to install)
 
@@ -60,11 +81,11 @@ Effect IDs on this build: **220–236** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-236".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-237".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–46), the Vegas scenes (70–77) and the *Vegas Night* playlist (79),
+   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77) and the *Vegas Night* playlist (79),
    plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
    since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
    Lights → the strip → Scenes → **Add Vegas scenes**.)

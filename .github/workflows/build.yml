@@ -69,7 +69,7 @@ jobs:
           missing=0
           for fx in "Holiday Bulbs@" "Holiday Twinkle@" "Candy Cane@" "Retro C9@" "Fireworks Burst@" \
                     "Ocean Swell@" "Lightning Storm@" "Sunrise@Minutes" "Boom Fireworks@" "Pool Shimmer@" "Northern Lights@" \
-                    "Vegas Marquee@" "Neon Sign@" "Jackpot@" "Roulette@" "Dancing Fountains@" "Showgirl Sparkle@"; do
+                    "Vegas Marquee@" "Neon Sign@" "Jackpot@" "Roulette@" "Dancing Fountains@" "Showgirl Sparkle@" "Candy Land@"; do
             if strings "$BIN" | grep -q "$fx"; then echo "ok: $fx"; else echo "MISSING: $fx"; missing=1; fi
           done
           { echo "Built $(date -u +%F' '%H:%MZ) from ${GITHUB_SHA::7}"; echo "Size: $(stat -c%s $BIN) bytes";

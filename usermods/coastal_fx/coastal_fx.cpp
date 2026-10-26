@@ -3,6 +3,9 @@
  * Target: WLED 16.0.1, classic ESP32, SK6812 RGBW pixels
  *
  * Effects (they show up in the WLED effect list, Home Assistant and the Home app):
+ * Direction: everything that travels moves from the segment's first pixel toward its last, like
+ * WLED's own chases. To make a strip run the other way, tick "Reversed" for its output in
+ * LED Preferences (or the segment's reverse button).
  *   Holiday Bulbs    - alternating bulbs in colors 1/2/3 that chase or swap
  *   Holiday Twinkle  - alternating bulbs with warm-white sparkles
  *   Candy Cane       - moving stripes in colors 1/2
@@ -21,6 +24,7 @@
  *   Roulette         - a ball racing around a red/black wheel, dropping and settling in a pocket
  *   Dancing Fountains- a fountain show with choreographed jets (or dancing to the mic)
  *   Showgirl Sparkle - pink, gold and violet plumes with glittering sequins
+ *   Candy Land (237) - candy colors and white frosting: Candy Path, Gumdrop Pop, Lollipop Swirl
  *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
@@ -80,14 +84,15 @@ void mode_holiday_bulbs() {
     const uint32_t period = 4200 - (uint32_t)SEGMENT.speed * 16;  // ms per bulb step: ~4.2s .. ~120ms
     phase16 = (uint32_t)(((uint64_t)strip.now << 8) / period);
   }
-  const uint32_t whole = phase16 >> 8;
+  // colors step toward the end of the strip: bulb b shows the color bulb b-1 had
+  const uint32_t back = n - (phase16 >> 8) % n;
   const uint8_t frac = SEGMENT.check1 ? (phase16 & 0xFF) : 0;
 
   for (int i = 0; i < len; i++) {
     const uint32_t bulb = i / size;
-    const uint32_t a = cols[(bulb + whole) % n];
+    const uint32_t a = cols[(bulb + back) % n];
     if (frac) {
-      const uint32_t b = cols[(bulb + whole + 1) % n];
+      const uint32_t b = cols[(bulb + back + n - 1) % n];   // the color arriving from behind
       SEGMENT.setPixelColor(i, color_blend(a, b, frac));
     } else {
       SEGMENT.setPixelColor(i, a);
@@ -141,10 +146,12 @@ void mode_candy_cane() {
   const uint32_t a = cols[0], b = cols[1];
   const uint16_t width = 2 + (SEGMENT.intensity >> 4);   // 2..17 px per stripe
   const uint32_t period = (uint32_t)width * 2;          // one red + one white stripe
-  uint32_t off16 = 0;                                    // 8.8 fixed point pixel offset
-  if (SEGMENT.speed) off16 = (uint32_t)(((uint64_t)strip.now * SEGMENT.speed) >> 7);
+  // 8.8 fixed point: how far the stripes have moved toward the end, kept within one period
+  const uint32_t per16 = period << 8;
+  uint32_t back16 = 0;
+  if (SEGMENT.speed) back16 = per16 - (uint32_t)((((uint64_t)strip.now * SEGMENT.speed) >> 7) % per16);
   for (int i = 0; i < len; i++) {
-    const uint32_t p16 = ((uint32_t)i << 8) + off16;
+    const uint32_t p16 = ((uint32_t)i << 8) + back16;
     const uint32_t pos = (p16 >> 8) % period;
     const uint8_t frac = p16 & 0xFF;
     const bool inA = pos < width;
@@ -237,8 +244,9 @@ const char _data_fireworks_burst[] PROGMEM =
   "Fireworks Burst@Launch rate,Burst size,Trail fade;!,!,!;;1;sx=120,ix=128,c1=96";
 
 // ---------------------------------------------------------------- Ocean Swell
-// Two waves rolling against each other, blended between colors 1 and 2, with
-// whitecaps from the W chip on the crests. Speed = wave speed, Intensity = whitecaps.
+// Two sets of waves rolling toward the end of the strip at slightly different speeds, blended
+// between colors 1 and 2, with whitecaps from the W chip where their crests meet (the meeting
+// points roll the same way). Speed = wave speed, Intensity = whitecaps.
 void mode_ocean_swell() {
   const int len = SEGLEN;
   if (len < 1) { staticFallback(); return; }
@@ -247,8 +255,8 @@ void mode_ocean_swell() {
   const uint32_t t = ((uint32_t)strip.now * (SEGMENT.speed + 8)) >> 9;
   const uint8_t foamStart = 255 - (SEGMENT.intensity >> 1);  // higher intensity = more foam
   for (int i = 0; i < len; i++) {
-    const uint8_t w1 = sin8_t(i * 6 + t);
-    const uint8_t w2 = sin8_t(i * 11 - (t >> 1) + 90);
+    const uint8_t w1 = sin8_t(i * 6 - t);                   // long swell
+    const uint8_t w2 = sin8_t(i * 11 - t - (t >> 1) + 90);  // shorter, a little faster: crests meet further along
     const uint8_t mix = (w1 + w2) >> 1;
     uint32_t c = color_blend(cols[0], cols[1], mix);
     if (SEGMENT.intensity && mix > foamStart) {
@@ -256,7 +264,7 @@ void mode_ocean_swell() {
       c = color_blend(c, WARM, sc8(foam, 200));
     }
     // a slow brightness swell over the whole strip
-    c = color_fade(c, 170 + (sin8_t(i * 2 + (t >> 2)) / 3), true);
+    c = color_fade(c, 170 + (sin8_t(i * 2 - (t >> 2)) / 3), true);
     SEGMENT.setPixelColor(i, c);
   }
 }
@@ -494,8 +502,8 @@ const char _data_boom_fireworks[] PROGMEM =
 // ---------------------------------------------------------------- Pool Shimmer
 // Sunlight through moving water, playing on a wall: thin, bright, constantly shifting
 // ribbons of light (caustics) over deep pool blue. Two layers of slowly morphing noise
-// drift against each other; where a layer's value crosses its midpoint a sharp bright
-// line forms, and where both layers' lines meet they flare brighter.
+// drift toward the end of the strip at different speeds; where a layer's value crosses its
+// midpoint a sharp bright line forms, and where both layers' lines meet they flare brighter.
 //   Speed      - how fast the water moves
 //   Sparkle    - brightness and sharpness of the light ribbons
 //   Ripple size- width of the ripples (small = choppy, large = lazy swell)
@@ -524,9 +532,9 @@ void mode_pool_shimmer() {
 
   for (int i = 0; i < len; i++) {
     const uint16_t x = i * step;
-    // two layers, drifting opposite ways and morphing over time (2nd noise axis)
-    const uint8_t a = ridge(perlin8(x + (t >> 1),          t >> 2));
-    const uint8_t b = ridge(perlin8(x * 3 / 2 - (t >> 2) + 9000, (t >> 3) + 31000));
+    // two layers, drifting the same way at different speeds and morphing over time (2nd noise axis)
+    const uint8_t a = ridge(perlin8(x - (t >> 1),          t >> 2));             // drifts toward the end
+    const uint8_t b = ridge(perlin8(x * 3 / 2 - (t >> 2) + 9000, (t >> 3) + 31000)); // finer and slower
     uint16_t c = ((uint16_t)a + b) / 3 + (((uint16_t)a * b) >> 7);         // thin lines, crossings flare
     c = (c * gain) >> 7;
     if (c > 255) c = 255;
@@ -570,15 +578,15 @@ void mode_northern_lights() {
     const uint16_t x = i * step;
     // the curtain body: big, slowly folding noise
     // two layers folding against each other so curtains grow, merge and split instead of scrolling
-    const int b1 = perlin8(x + t, t >> 2);
-    const int b2 = perlin8(x * 2 / 3 - (t >> 1) + 22000, (t >> 3) + 5000);
+    const int b1 = perlin8(x - t, t >> 2);                                 // drifts toward the end
+    const int b2 = perlin8(x * 2 / 3 + (t >> 1) + 22000, (t >> 3) + 5000);
     int body = b1 > b2 ? b1 : b2;
     int glow = (body - thresh) * 255 / (256 - thresh > 1 ? 256 - thresh : 1);
     if (glow < 0) glow = 0;
     if (glow > 255) glow = 255;
     glow = (glow * glow) >> 8;                                             // soft edges
     // rays: fine, faster ripples inside the curtain
-    const uint8_t ray = perlin8(x * 4 + (t << 1), t + 7000);
+    const uint8_t ray = perlin8(x * 4 - (t << 1), t + 7000);
     glow = (glow * (150 + (ray >> 1) + (ray >> 2))) >> 8;                  // 150..341 / 256
     if (glow > 255) glow = 255;
 
@@ -919,7 +927,7 @@ void mode_jackpot() {
         if (!center) c = color_fade(c, jackpot ? 40 : 70, true);  // the rest dims: the payline shows
         else if (!jackpot) c = color_fade(c, 190 + (sin8_t(after >> 2) >> 2), true);
       }
-      SEGMENT.setPixelColor(x0 + j, c);
+      SEGMENT.setPixelColor(x0 + L - 1 - j, c);             // drawn back to front: symbols roll toward the end
     }
     if (nr > 1 && r < nr - 1 && x0 + L < len) SEGMENT.setPixelColor(x0 + L, frame);
   }
@@ -934,7 +942,7 @@ void mode_jackpot() {
       const uint8_t fade = after > 5000 ? (uint8_t)min<uint32_t>(255, (after - 5000) * 255 / 600) : 0;
       for (int i = 0; i < len; i++) {
         uint32_t c = SEGMENT.getPixelColor(i);
-        if ((i + chase) % 3 == 0) c = color_blend(c, GOLD, 255 - fade);
+        if ((i + 3 - chase) % 3 == 0) c = color_blend(c, GOLD, 255 - fade);   // chases toward the end
         const uint32_t h = vhash(i * 977u + (after / 45) * 7151u);
         if ((h & 0xFF) < 12) c = color_blend(c, SPARK, 255 - fade);  // coins
         SEGMENT.setPixelColor(i, c);
@@ -1211,7 +1219,7 @@ void mode_showgirl_sparkle() {
 
   for (int i = 0; i < len; i++) {
     // plume color: noise picks a spot along the color list, blending smoothly
-    const uint8_t nz = perlin8(i * step + (t >> 2), t >> 3);
+    const uint8_t nz = perlin8(i * step - (t >> 2), t >> 3);
     const uint16_t pos = ((uint32_t)nz * n * 2 + (t >> 5)) % (n * 256);   // drifts through all the colors
     const uint8_t a = (pos >> 8) % n, f = pos & 0xFF;
     uint32_t c = n == 1 ? cols[0] : color_blend(cols[a], cols[(a + 1) % n], f);
@@ -1224,6 +1232,192 @@ void mode_showgirl_sparkle() {
 }
 const char _data_showgirl_sparkle[] PROGMEM =
   "Showgirl Sparkle@Shimmer,Sequins,Feather size,,,My colors;!,!,!;;1;sx=96,ix=128,c1=100,o1=0";
+
+// ================================================================ Candy Land (237)
+// Candy colors with white frosting from the W chip, in three looks picked with the Look slider:
+//   0-63    Candy Path     - game-board spaces: 3 candy pixels and a frosting pixel, hopping one
+//                            space at a time along the strip, with sugar sparkles on top
+//   64-127  Gumdrop Pop    - soft pastel frosting drifting along while gumdrops pop up in random
+//                            spots, flash white in the middle and melt away
+//   128-191 Lollipop Swirl - stripes of 2 candy pixels and 1 frosting pixel drifting along and
+//                            swaying back and forth
+//   192-255 Tour           - the three in turn, 15 s each, with a short crossfade (the default)
+//   Speed, Sprinkles (sugar glints on the candy, candy sprinkles on the frosting), Look
+//   Checkbox "My colors": the candy colors come from slots 1-3 instead of the candy set
+// Everything travels toward the end of the segment. Speed changes are smooth: the effect keeps
+// its own clock ("candy time") that runs faster or slower with Speed.
+struct Rgbw { float r, g, b, w; };
+inline Rgbw unpackC(uint32_t c) { return { float((c >> 16) & 0xFF), float((c >> 8) & 0xFF), float(c & 0xFF), float(c >> 24) }; }
+inline Rgbw mixC(const Rgbw &a, const Rgbw &b, float k) {
+  return { a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k, a.w + (b.w - a.w) * k };
+}
+inline Rgbw scaleC(const Rgbw &a, float k) { return { a.r * k, a.g * k, a.b * k, a.w * k }; }
+inline uint8_t clamp8(float v) { return v <= 0.0f ? 0 : (v >= 255.0f ? 255 : (uint8_t)(v + 0.5f)); }
+inline uint32_t packC(const Rgbw &c) { return RGBW32(clamp8(c.r), clamp8(c.g), clamp8(c.b), clamp8(c.w)); }
+// stateless random number 0..1 from three integers
+inline float h01(uint32_t a, uint32_t b, uint32_t c) {
+  return (vhash(a * 2654435761u + vhash(b * 40503u + c * 0x9E3779B1u + 12345u)) >> 8) / 16777216.0f;
+}
+inline float easeC(float x) { return x * x * (3.0f - 2.0f * x); }
+
+const uint32_t CANDY[8] = {
+  RGBW32(255, 20, 60, 0),    // cherry
+  RGBW32(255, 100, 0, 0),    // tangerine
+  RGBW32(255, 190, 0, 0),    // lemon
+  RGBW32(80, 220, 20, 0),    // lime
+  RGBW32(20, 80, 255, 0),    // blueberry
+  RGBW32(150, 30, 255, 0),   // grape
+  RGBW32(255, 50, 150, 0),   // bubblegum
+  RGBW32(40, 255, 150, 0),   // mint
+};
+const uint32_t PASTEL[4] = { RGBW32(255, 90, 170, 40), RGBW32(90, 255, 190, 40), RGBW32(255, 215, 90, 40), RGBW32(170, 120, 255, 40) };
+const uint8_t SWIRL_ORDER[7] = { 0, 2, 4, 6, 3, 1, 5 };   // cherry, lemon, blueberry, bubblegum, lime, tangerine, grape
+constexpr uint8_t MAX_GUMDROPS = 40;
+
+struct CandyState { uint32_t last, ct; float rem; };
+struct Gumdrop { float cen, env, tau; Rgbw col; };
+
+struct CandyCtx {
+  int len; uint32_t ct, now, seed; float den;
+  Rgbw cand[8]; uint8_t nc; bool mine;
+  Rgbw frost;
+  Gumdrop drops[MAX_GUMDROPS]; uint8_t nd; bool dropsReady;
+  // the colors each look cycles through: the user's slots, or the candy set
+  Rgbw pathCol(uint32_t k) const { return mine ? cand[k % nc] : cand[k % 6]; }
+  uint8_t pathN() const { return mine ? nc : 6; }
+  Rgbw swirlCol(uint32_t k) const { return mine ? cand[k % nc] : cand[SWIRL_ORDER[k % 7]]; }
+  uint8_t swirlN() const { return mine ? nc : 7; }
+  Rgbw gumCol(float u) const { return cand[min((int)(u * nc), nc - 1)]; }   // all 8 candy colors (or the user's)
+};
+
+// sugar on top: white glints on the candy, candy-colored sprinkles on the frosting.
+// Runs on real time so it twinkles the same at any Speed.
+Rgbw sprinkle(const CandyCtx &x, Rgbw c, int i, float den, bool frosting) {
+  const uint32_t L = 380;
+  const uint32_t u = x.now + (uint32_t)(h01(i, x.seed, 1) * L);
+  const uint32_t slot = u / L;
+  if (h01(i, slot, x.seed + 2) >= den * 0.13f) return c;
+  const float f = (float)(u % L) / L, k = (1.0f - f) * (1.0f - f);
+  const Rgbw s = frosting ? x.gumCol(h01(i, slot, x.seed + 3)) : Rgbw{ 255, 255, 255, 255 };
+  return mixC(c, s, k);
+}
+
+Rgbw candyPath(const CandyCtx &x, int i) {
+  // one space (4 pixels) per beat of 1150 candy-ms, the hop eased over the first third of the beat
+  const uint32_t beat = x.ct / 1150;
+  float f = (float)(x.ct % 1150) / (1150.0f * 0.32f);
+  if (f > 1.0f) f = 1.0f;
+  const uint32_t np = x.pathN(), period = 4 * np;
+  const uint32_t off = (beat % np) * 4 + (uint32_t)(easeC(f) * 4.0f);   // 0 .. period
+  const uint32_t p = (uint32_t)i + 2 * period - off;                     // i - off, kept positive
+  const bool frost = p % 4 == 3;
+  return sprinkle(x, frost ? x.frost : x.pathCol((p / 4) % np), i, x.den, frost);
+}
+
+void gumdropSetup(CandyCtx &x) {
+  int nd = (int)lroundf(x.len / 7.0f * (0.45f + x.den));
+  nd = constrain(nd, 2, (int)MAX_GUMDROPS);
+  x.nd = nd;
+  for (int j = 0; j < nd; j++) {
+    Gumdrop &d = x.drops[j];
+    const uint32_t P = 2300 + (uint32_t)(h01(j, x.seed, 4) * 1700);       // candy-ms between pops
+    const uint32_t tt = x.ct + (uint32_t)(h01(j, x.seed, 5) * P);
+    const uint32_t cyc = tt / P;
+    d.tau = (float)(tt % P) / 1000.0f;                                     // seconds since this pop
+    d.cen = h01(j, cyc, x.seed + 6) * (x.len - 1);
+    d.col = x.gumCol(h01(j, cyc, x.seed + 7));
+    d.env = d.tau < 0.14f ? d.tau / 0.14f : expf(-(d.tau - 0.14f) * 2.3f);
+  }
+  x.dropsReady = true;
+}
+
+Rgbw gumdrop(CandyCtx &x, int i) {
+  if (!x.dropsReady) gumdropSetup(x);
+  // pastel frosting drifting along (one trip through the colors every ~22 s at speed 1)
+  float u = i / 17.0f - (x.ct % 200000) * 0.000045f + (x.seed % 97) * 0.21f;
+  u -= floorf(u);
+  Rgbw c;
+  if (x.mine) {
+    const float v = u * x.nc; const int a = (int)v % x.nc;
+    c = scaleC(mixC(x.cand[a], x.cand[(a + 1) % x.nc], v - (int)v), 0.3f);
+    c.w += 12.0f;
+  } else {
+    const float v = u * 4; const int a = (int)v % 4;
+    c = scaleC(mixC(unpackC(PASTEL[a]), unpackC(PASTEL[(a + 1) % 4]), v - (int)v), 0.3f);
+  }
+  for (int j = 0; j < x.nd; j++) {
+    const Gumdrop &d = x.drops[j];
+    if (d.env <= 0.01f) continue;
+    const float dist = fabsf(i - d.cen), w = 1.0f - dist / 1.75f;
+    if (w <= 0.0f) continue;
+    const float k = w * d.env;
+    c.r += d.col.r * k; c.g += d.col.g * k; c.b += d.col.b * k; c.w += d.col.w * k;
+    if (dist < 0.6f && d.tau < 0.35f) c.w += 140.0f * (1.0f - d.tau / 0.35f);   // white flash in the middle
+  }
+  return c;
+}
+
+Rgbw lollipop(const CandyCtx &x, int i) {
+  // 2.4 px per candy-second along the strip (wraps after 126 px: a whole number of stripe
+  // cycles for 1, 2, 3 or 7 colors) plus a sway of +-7 px every 8 candy-seconds
+  const float phase = (x.ct % 52500) * 0.0024f + sinf((x.ct % 8000) * (6.2831853f / 8000.0f)) * 7.0f;
+  const float p = i - phase + 504.0f;                                      // kept positive
+  const uint32_t q = (uint32_t)p;
+  const float fr = p - q;
+  const uint32_t ns = x.swirlN();
+  auto at = [&](uint32_t s) { return s % 3 == 2 ? x.frost : x.swirlCol((s / 3) % ns); };
+  const Rgbw c = mixC(at(q), at(q + 1), fr);                               // smooth as the stripes slide
+  return sprinkle(x, c, i, x.den * 0.6f, (fr < 0.5f ? q : q + 1) % 3 == 2);
+}
+
+Rgbw candyLook(CandyCtx &x, uint8_t look, int i) {
+  switch (look) {
+    case 0:  return candyPath(x, i);
+    case 1:  return gumdrop(x, i);
+    default: return lollipop(x, i);
+  }
+}
+
+void mode_candy_land() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(CandyState))) { staticFallback(); return; }
+  CandyState *st = reinterpret_cast<CandyState *>(SEGENV.data);
+  const uint32_t now = strip.now;
+  if (SEGENV.call == 0) { st->last = now; st->ct = 4000; st->rem = 0.0f; }   // start with gumdrops already popping
+  uint32_t dt = now - st->last;
+  st->last = now;
+  if (dt > 200) dt = 200;
+  // candy time: Speed 128 = real time, 0 = a quarter, 255 = 1.75x
+  const float adv = dt * (0.25f + SEGMENT.speed / 170.0f) + st->rem;
+  st->ct += (uint32_t)adv;
+  st->rem = adv - (uint32_t)adv;
+
+  static CandyCtx x;              // big (gumdrops): static, not on the stack
+  x.len = len; x.ct = st->ct; x.now = now; x.den = SEGMENT.intensity / 255.0f;
+  x.seed = 1 + SEGMENT.start * 7919u;   // each segment sparkles differently
+  x.frost = unpackC(WARM);
+  x.nc = 0;
+  if (SEGMENT.check1) for (uint8_t s = 0; s < 3; s++) if (SEGCOLOR(s)) x.cand[x.nc++] = unpackC(SEGCOLOR(s));
+  x.mine = x.nc > 0;
+  if (!x.mine) { for (uint8_t k = 0; k < 8; k++) x.cand[k] = unpackC(CANDY[k]); x.nc = 8; }
+  x.dropsReady = false;
+
+  const uint8_t look = SEGMENT.custom1 >> 6;     // 0 path, 1 gumdrop, 2 swirl, 3 tour
+  uint8_t a = look, b = 255;
+  float k = 1.0f;
+  if (look == 3) {                                // tour: 15 s each, 1.4 s crossfade from the last one
+    const uint32_t per = 15000, f = now % per;
+    a = (now / per) % 3;
+    if (f < 1400) { b = (a + 2) % 3; k = f / 1400.0f; }
+  }
+  for (int i = 0; i < len; i++) {
+    Rgbw c = candyLook(x, a, i);
+    if (b != 255) c = mixC(candyLook(x, b, i), c, k);
+    SEGMENT.setPixelColor(i, packC(c));
+  }
+}
+const char _data_candy_land[] PROGMEM =
+  "Candy Land@Speed,Sprinkles,Look,,,My colors;!,!,!;;1;sx=128,ix=140,c1=255,o1=0";
 
 }  // namespace
 
@@ -1260,6 +1454,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_roulette,          _data_roulette);
     add(&mode_dancing_fountains, _data_dancing_fountains);
     add(&mode_showgirl_sparkle,  _data_showgirl_sparkle);
+    add(&mode_candy_land,        _data_candy_land);       // 237
   }
 
   void loop() override {}
