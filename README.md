@@ -1,6 +1,6 @@
 # Coastal FX — custom WLED effects
 
-Eighteen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+Nineteen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
 
 **Direction:** everything that travels (bulbs, stripes, waves, chases, reels, candy) moves from the
 segment's first pixel toward its last, the same way WLED's own chases run. To make a strip run the
@@ -50,14 +50,36 @@ Controls: Speed, **Sprinkles** (sugar glints on the candy, candy sprinkles on th
 **My colors** (candy colors from slots 1–3). The frosting is the warm-white chip. Speed changes are
 smooth: the effect keeps its own clock, so it never jumps.
 
+### UCF Knights (id 238) 🎵
+
+![UCF Knights](effect-preview-ucf.png)
+
+*Time runs down, pixels across, with a microphone hearing a kick drum: Charge On, Bounce House, Crowd Roar, Tour with the built-in beat, and Show mic level.*
+
+A black and gold game-day effect that moves to sound through the microphone (AudioReactive). A beat
+is a sudden jump in the bass above the room's background noise, as in Boom Fireworks.
+
+| Look (slider) | What it does |
+|---|---|
+| Charge On (0–63) | Every beat launches a gold charge from pixel 1 down the strip; harder hits run brighter, longer and faster, the biggest with a white-hot head. Gold embers glow with the loudness |
+| Bounce House (64–127) | Stadium sections (6 pixels and a gap) jump on the kick, alternating like the two sides of the stands, then drop with a couple of rebounds |
+| Crowd Roar (128–191) | Gold sparkles as loud as the crowd, a burst on every beat (white glints on big ones); when it stays loud a gold wave sweeps down the strip |
+| Tour (192–255, default) | The three in turn, 20 seconds each, with a short fade between |
+
+Controls: Speed, **Sensitivity** (higher = quieter beats count), Look, **My colors** (slot 1 replaces
+the gold, slot 2 the white flash), **Show mic level** (the first 30 pixels: gold = what it hears,
+red = where a beat counts; tune Sensitivity so the red sits above the background but below the kick).
+With no beat for a few seconds (between songs) it settles into slow gold and black stripes. With
+AudioReactive off it plays its own drumline, with a crowd roar every 36 seconds.
+
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–237** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-237" when the firmware is running.
+Effect IDs on this build: **220–238** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-238" when the firmware is running.
 
 ## Build (GitHub, no software to install)
 
@@ -81,11 +103,11 @@ Effect IDs on this build: **220–237** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-237".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-238".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77) and the *Vegas Night* playlist (79),
+   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79) and the UCF Knights scenes (80–83),
    plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
    since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
    Lights → the strip → Scenes → **Add Vegas scenes**.)

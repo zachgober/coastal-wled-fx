@@ -25,6 +25,7 @@
  *   Dancing Fountains- a fountain show with choreographed jets (or dancing to the mic)
  *   Showgirl Sparkle - pink, gold and violet plumes with glittering sequins
  *   Candy Land (237) - candy colors and white frosting: Candy Path, Gumdrop Pop, Lollipop Swirl
+ *   UCF Knights (238)- black and gold game day that moves to sound (mic): Charge On, Bounce House, Crowd Roar
  *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
@@ -1419,6 +1420,217 @@ void mode_candy_land() {
 const char _data_candy_land[] PROGMEM =
   "Candy Land@Speed,Sprinkles,Look,,,My colors;!,!,!;;1;sx=128,ix=140,c1=255,o1=0";
 
+// ================================================================ UCF Knights (238)
+// A black and gold game-day effect that moves to sound through the microphone (AudioReactive):
+// the drumline, music and the crowd. A beat is a sudden jump in the bass above the room's
+// background noise (as in Boom Fireworks). Looks, picked with the Look slider:
+//   0-63    Charge On     - every beat launches a gold charge from pixel 1 that races down the
+//                           strip; harder hits run brighter, longer and faster, the biggest with a
+//                           white-hot head; gold embers glow underneath with the loudness
+//   64-127  Bounce House  - stadium sections (6 pixels and a gap) jump on the kick, alternating
+//                           like the two sides of the stands, then drop with a couple of rebounds
+//   128-191 Crowd Roar    - gold sparkles as loud as the crowd, a burst on each beat (white glints
+//                           on big ones); when the noise stays up a gold wave sweeps down the strip
+//   192-255 Tour          - the three in turn, 20 s each, with a short crossfade (the default)
+// With no beat for a few seconds (between songs) it settles into slow gold and black stripes.
+// Without the microphone (AudioReactive off) it plays its own game-day drumline.
+//   Speed, Sensitivity (higher = quieter beats count), Look
+//   Checkbox "My colors": slot 1 replaces the gold, slot 2 the white flash (another team's colors)
+//   Checkbox "Show mic level": tuning aid, a meter on the first pixels (gold = bass, red = trigger)
+// Colors: UCF Bold Gold (#EDB80D) as these LEDs show it, plus the white chip for the flashes.
+struct KComet { float x, v, p, len; uint8_t hot; };
+constexpr uint8_t MAX_KCOMETS = 10;
+struct KnightState {
+  uint32_t lastStep, lastBeat, beats, kickT[2];
+  float floor, prev, vol, level, pow, roar, waveX, idleX, kickP[2];
+  uint8_t wave, nComets;
+  KComet comets[MAX_KCOMETS];
+};
+
+// what the microphone would hear from a drumline at 128 bpm with crowd swells and a big roar
+// for the last 8 seconds of every 36 (used when AudioReactive isn't running)
+void knightDemo(uint32_t now, float &level, float &bass) {
+  float b = 0, sn = 0;
+  const uint64_t t = now, k1 = t * 16 / 1875, k0 = t > 500 ? (t - 500) * 16 / 1875 : 0;   // sixteenths: 117.1875 ms
+  for (uint64_t k = k0; k <= k1; k++) {
+    const uint64_t te = k * 1875 / 16;
+    if (te > t) continue;
+    const uint32_t beat = k / 4, sub = k % 4, bar = beat / 4, inBar = beat % 4;
+    const bool roar = te % 36000 > 28000, fill = bar % 8 == 7 && inBar >= 2;
+    const float d = (t - te) / 1000.0f;
+    if (sub == 0 && (inBar % 2 == 0 || roar)) {
+      const float p = roar ? 1.0f : 0.78f + 0.12f * ((vhash((uint32_t)k) & 255) / 255.0f);
+      b = max(b, p * expf(-d / 0.09f));
+    } else if (sub == 0) sn = max(sn, 0.7f * expf(-d / 0.07f));
+    else if (fill) sn = max(sn, (0.35f + 0.1f * sub) * expf(-d / 0.07f));
+  }
+  const float tt = (now % 36000) / 1000.0f;
+  float r = 0;
+  if (tt > 28.0f) r = constrain((tt - 28.0f) / 1.5f, 0.0f, 1.0f) * constrain((36.0f - tt) / 1.2f, 0.0f, 1.0f);
+  const float c = 0.22f + 0.12f * perlin8((uint16_t)(now / 20), 777) / 255.0f + 0.62f * r;
+  level = constrain(255.0f * (0.55f * c + 0.45f * b + 0.3f * sn), 0.0f, 255.0f);
+  bass = constrain(255.0f * (b + 0.18f * c), 0.0f, 255.0f);
+}
+
+// one bounce of a section (0..1): up and down, then two small rebounds
+inline float kBounce(float d) {
+  if (d < 0) return 0;
+  if (d < 0.34f) return sinf(3.14159f * d / 0.34f);
+  if (d < 0.54f) return 0.3f * sinf(3.14159f * (d - 0.34f) / 0.2f);
+  if (d < 0.66f) return 0.09f * sinf(3.14159f * (d - 0.54f) / 0.12f);
+  return 0;
+}
+
+void mode_ucf_knights() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(KnightState) + len * 2)) { staticFallback(); return; }
+  KnightState *st = reinterpret_cast<KnightState *>(SEGENV.data);
+  uint8_t *spark = SEGENV.data + sizeof(KnightState), *white = spark + len;
+  const uint32_t now = strip.now;
+  if (SEGENV.call == 0) {
+    memset(SEGENV.data, 0, sizeof(KnightState) + len * 2);
+    st->lastStep = now; st->lastBeat = now - 2500; st->floor = 20.0f;
+    st->kickT[0] = st->kickT[1] = now - 5000;
+    SEGMENT.fill(BLACK);
+  }
+  if (now - st->lastStep > 200) st->lastStep = now - 20;           // paused: don't catch up
+  if (now - st->lastStep < 20) return;                             // listen and move 50 times a second
+
+  um_data_t *um = nullptr;
+  const bool haveMic = UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) && um && um->u_size >= 3;
+  const float sp = 0.4f + SEGMENT.speed * (1.6f / 255.0f);          // 0.4x .. 2x, 1x at 96
+  const float thresh = 8.0f + (255 - SEGMENT.intensity) * 0.45f;   // Sensitivity 255 -> 8, 0 -> ~123
+  const Rgbw GOLD_C = SEGMENT.check1 && SEGCOLOR(0) ? unpackC(SEGCOLOR(0)) : Rgbw{ 255, 140, 0, 30 };
+  const Rgbw HOT_C = SEGMENT.check1 && SEGCOLOR(1) ? unpackC(SEGCOLOR(1)) : Rgbw{ 255, 200, 120, 255 };
+
+  for (uint8_t guard = 0; now - st->lastStep >= 20 && guard < 10; guard++) {
+    st->lastStep += 20;
+    const float dt = 0.02f;
+    // ---- listen
+    float smth, bass;
+    if (haveMic) {
+      const uint8_t *fft = (const uint8_t *)um->u_data[2];
+      smth = *(float *)um->u_data[0];
+      bass = max(fft[0], max(fft[1], fft[2]));                     // ~43-215 Hz: the kick drum
+    } else knightDemo(st->lastStep, smth, bass);
+    const float level = (bass * 2.0f + smth) / 3.0f;
+    st->vol += (constrain(smth, 0.0f, 255.0f) / 255.0f - st->vol) * 0.25f;
+    st->level = level;
+    const float above = level - st->floor;
+    const bool sudden = level - st->prev > thresh * 0.5f;
+    st->prev = level;
+    st->floor += (level - st->floor) * (level > st->floor ? 0.004f : 0.05f);
+    bool beat = false;
+    if (above > thresh && sudden && st->lastStep - st->lastBeat > 160) {
+      const float span = max(20.0f, 255.0f - st->floor - thresh);
+      st->pow = constrain(0.35f + (above - thresh) / span * 0.75f, 0.35f, 1.0f);
+      st->lastBeat = st->lastStep; st->beats++; beat = true;
+    }
+    // ---- move
+    if (beat) {
+      if (st->nComets < MAX_KCOMETS) {
+        KComet &c = st->comets[st->nComets++];
+        c.x = -1; c.v = (34 + 50 * st->pow) * sp; c.p = st->pow; c.len = 4 + 8 * st->pow; c.hot = st->pow > 0.8f;
+      }
+      st->kickT[st->beats % 2] = st->lastStep; st->kickP[st->beats % 2] = st->pow;
+      const int burst = (int)(len * (0.06f + 0.2f * st->pow));
+      for (int k = 0; k < burst; k++) {
+        const int i = hw_random16(len);
+        spark[i] = 255; white[i] = st->pow > 0.8f && k % 3 == 0;
+      }
+    }
+    for (uint8_t k = 0; k < st->nComets; ) {
+      KComet &c = st->comets[k];
+      c.x += c.v * dt;
+      if (c.x - c.len >= len) st->comets[k] = st->comets[--st->nComets]; else k++;
+    }
+    const uint16_t chance = (uint16_t)min(65535.0f, (0.006f + 0.12f * st->vol * st->vol) * 65536.0f);
+    for (int i = 0; i < len; i++) {
+      spark[i] = (uint16_t)spark[i] * 229 >> 8;                    // fades in ~0.2 s
+      if (hw_random16() < chance) { const uint8_t v = 140 + hw_random8(115); if (v > spark[i]) { spark[i] = v; white[i] = 0; } }
+    }
+    st->roar = max(0.0f, st->roar + dt * (st->vol - 0.42f) * 1.6f);   // loud for ~2-3 s -> the wave
+    if (st->roar > 1.0f && !st->wave) { st->wave = 1; st->waveX = -8; st->roar = 0; }
+    if (st->wave) { st->waveX += 24 * sp * dt; if (st->waveX > len + 10) st->wave = 0; }
+    st->idleX += 2.2f * sp * dt; if (st->idleX >= 8.0f) st->idleX -= 8.0f;
+  }
+
+  // ---- draw
+  const uint8_t look = SEGMENT.custom1 >> 6;                       // 0 charge, 1 bounce, 2 crowd, 3 tour
+  uint8_t a = look, b = 255;
+  float kf = 1.0f;
+  if (look == 3) {
+    const uint32_t per = 20000, f = now % per;
+    a = (now / per) % 3;
+    if (f < 1400) { b = (a + 2) % 3; kf = f / 1400.0f; }
+  }
+  const float quiet = constrain(((int32_t)(now - st->lastBeat) - 3000) / 2000.0f, 0.0f, 1.0f);
+  const float age[2] = { (now - st->kickT[0]) / 1000.0f * sp, (now - st->kickT[1]) / 1000.0f * sp };
+  auto drawLook = [&](uint8_t which, int i) -> Rgbw {
+    switch (which) {
+      case 0: {                                                    // Charge On
+        const float nz = perlin8((uint16_t)(i * 230), (uint16_t)(now >> 2)) / 255.0f;
+        Rgbw c = scaleC(GOLD_C, 0.06f + 0.14f * st->vol * nz);
+        for (uint8_t k = 0; k < st->nComets; k++) {
+          const KComet &m = st->comets[k];
+          const float d = m.x - i;
+          if (d < -1 || d > m.len) continue;
+          Rgbw add;
+          if (d < 1) add = scaleC(m.hot ? HOT_C : GOLD_C, d < 0 ? 1 + d : 1);     // the head, between pixels
+          else { const float q = 1 - d / m.len; add = scaleC(GOLD_C, q * q * (0.35f + 0.65f * m.p)); }
+          c.r += add.r; c.g += add.g; c.b += add.b; c.w += add.w;
+        }
+        return c;
+      }
+      case 1: {                                                    // Bounce House
+        const int s = i / 7, j = i % 7;
+        if (j == 6) return Rgbw{ 0, 0, 0, 0 };                     // the gap between sections
+        const float h = kBounce(age[s % 2]) * st->kickP[s % 2];
+        const float half = 0.7f + 2.8f * h, d = fabsf(j - 2.5f);
+        const float lit = constrain(half - d + 0.5f, 0.0f, 1.0f);
+        Rgbw c = scaleC(GOLD_C, 0.08f + 0.1f * st->vol + lit * (0.3f + 0.7f * h));
+        if (h > 0.82f && d < 1) c = mixC(c, HOT_C, min(1.0f, (h - 0.82f) * 4));
+        return c;
+      }
+      default: {                                                   // Crowd Roar
+        Rgbw c = scaleC(GOLD_C, 0.05f);
+        if (spark[i] > 5) {
+          const float v = spark[i] / 255.0f;
+          const Rgbw add = scaleC(white[i] ? HOT_C : GOLD_C, v * v);
+          c.r += add.r; c.g += add.g; c.b += add.b; c.w += add.w;
+        }
+        if (st->wave) {
+          const float d = i - st->waveX, w = expf(-(d * d) / 14.0f);
+          const Rgbw add = scaleC(GOLD_C, 0.9f * w);
+          c.r += add.r; c.g += add.g; c.b += add.b; c.w += add.w;
+          if (fabsf(d) < 0.8f) { const Rgbw h = scaleC(HOT_C, 0.5f * (1 - fabsf(d) / 0.8f)); c.r += h.r; c.g += h.g; c.b += h.b; c.w += h.w; }
+        }
+        return c;
+      }
+    }
+  };
+  for (int i = 0; i < len; i++) {
+    Rgbw c = drawLook(a, i);
+    if (b != 255) c = mixC(drawLook(b, i), c, kf);
+    if (quiet > 0) {                                               // between songs: slow gold and black stripes
+      float f = fmodf(i - st->idleX + 800.0f, 8.0f);
+      c = mixC(c, scaleC(GOLD_C, f < 5 ? 0.4f : 0.02f), quiet);
+    }
+    SEGMENT.setPixelColor(i, packC(c));
+  }
+  // tuning aid: gold bar = what it hears (bass and loudness), red pixel = where a beat counts
+  if (SEGMENT.check2) {
+    const int bars = min(len, 30);
+    const int lv = (int)(st->level * bars / 255.0f);
+    const int tp = constrain((int)((st->floor + thresh) * bars / 255.0f), 0, bars - 1);
+    for (int i = 0; i < bars; i++) SEGMENT.setPixelColor(i, i < lv ? RGBW32(60, 34, 0, 0) : BLACK);
+    SEGMENT.setPixelColor(tp, RGBW32(120, 0, 0, 0));
+    if (now - st->lastBeat < 120) SEGMENT.setPixelColor(bars - 1 < len ? bars - 1 : 0, RGBW32(0, 0, 0, 160));
+  }
+}
+const char _data_ucf_knights[] PROGMEM =
+  "UCF Knights@Speed,Sensitivity,Look,,,My colors,Show mic level;Gold,Flash;;1f;sx=96,ix=160,c1=255,o1=0,o2=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -1455,6 +1667,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_dancing_fountains, _data_dancing_fountains);
     add(&mode_showgirl_sparkle,  _data_showgirl_sparkle);
     add(&mode_candy_land,        _data_candy_land);       // 237
+    add(&mode_ucf_knights,       _data_ucf_knights);      // 238 (sound reactive)
   }
 
   void loop() override {}
