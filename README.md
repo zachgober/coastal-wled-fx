@@ -1,6 +1,6 @@
 # Coastal FX — custom WLED effects
 
-Nineteen custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+Twenty custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
 
 **Direction:** everything that travels (bulbs, stripes, waves, chases, reels, candy) moves from the
 segment's first pixel toward its last, the same way WLED's own chases run. To make a strip run the
@@ -72,14 +72,33 @@ red = where a beat counts; tune Sensitivity so the red sits above the background
 With no beat for a few seconds (between songs) it settles into slow gold and black stripes. With
 AudioReactive off it plays its own drumline, with a crowd roar every 36 seconds.
 
+### Autumn Harvest (id 239)
+
+![Autumn Harvest](effect-preview-autumn-harvest.png)
+
+*Time runs down, pixels across: Falling Leaves, Turning Leaves, Harvest Bulbs.*
+
+Fall colors (maple red, pumpkin, amber, gold, cranberry, harvest yellow), warmed by the W chip.
+
+| Look (slider) | What it does |
+|---|---|
+| Falling Leaves (0–63) | Leaves drift along the strip on the breeze over a low ember glow, fluttering as they turn over and catch the light. Gusts carry them all faster for a moment; each leaf settles where it lands and fades away |
+| Turning Leaves (64–127) | Every pixel is a leaf slowly turning gold → amber → pumpkin → maple red → cranberry and back through rust, rustling; now and then a gust runs down the strip and glints through the leaves |
+| Harvest Bulbs (128–191) | Fall string lights (maple red, gold, pumpkin, warm clear) glowing a little unevenly like filament bulbs, the colors stepping one bulb along every 6 seconds, with twinkles |
+| Tour (192–255, default) | The three in turn, 20 seconds each, with a short fade between |
+
+Controls: Speed, **Leaves** (how many leaves, how often a gust comes, how many twinkles), Look,
+**My colors** (the leaf and bulb colors from slots 1–3). Like Candy Land it keeps its own clock,
+so speed changes are smooth.
+
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–238** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-238" when the firmware is running.
+Effect IDs on this build: **220–239** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-239" when the firmware is running.
 
 ## Build (GitHub, no software to install)
 
@@ -103,14 +122,14 @@ Effect IDs on this build: **220–238** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-238".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-239".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79) and the UCF Knights scenes (80–83),
+   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) and the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs),
    plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
    since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
-   Lights → the strip → Scenes → **Add Vegas scenes**.)
+   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights and Autumn Harvest.)
 
 ## Changing an effect
 

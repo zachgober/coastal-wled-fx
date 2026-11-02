@@ -26,6 +26,7 @@
  *   Showgirl Sparkle - pink, gold and violet plumes with glittering sequins
  *   Candy Land (237) - candy colors and white frosting: Candy Path, Gumdrop Pop, Lollipop Swirl
  *   UCF Knights (238)- black and gold game day that moves to sound (mic): Charge On, Bounce House, Crowd Roar
+ *   Autumn Harvest (239) - fall colors: Falling Leaves, Turning Leaves, Harvest Bulbs
  *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
@@ -1631,6 +1632,181 @@ void mode_ucf_knights() {
 const char _data_ucf_knights[] PROGMEM =
   "UCF Knights@Speed,Sensitivity,Look,,,My colors,Show mic level;Gold,Flash;;1f;sx=96,ix=160,c1=255,o1=0,o2=0";
 
+
+// ================================================================ Autumn Harvest (239)
+// Fall colors (maple red, pumpkin, amber, gold, cranberry, harvest yellow), warmed by the W chip,
+// in three looks picked with the Look slider:
+//   0-63    Falling Leaves - leaves drifting along the strip on the breeze over a low ember glow,
+//                            fluttering as they turn over; gusts carry them all faster for a
+//                            moment, and each one settles where it lands and fades away
+//   64-127  Turning Leaves - every pixel a leaf slowly turning through the fall colors, rustling;
+//                            now and then a gust runs down the strip and catches the light
+//   128-191 Harvest Bulbs  - fall string lights (maple red, gold, pumpkin, warm clear) glowing like
+//                            filament bulbs, the colors stepping slowly along, with twinkles
+//   192-255 Tour           - the three in turn, 20 s each, with a short crossfade (the default)
+//   Speed, Leaves (how many leaves, how often a gust comes, how many twinkles), Look
+//   Checkbox "My colors": the leaf and bulb colors come from slots 1-3 instead of the fall set
+// Everything travels toward the end of the segment. Like Candy Land it keeps its own clock
+// ("fall time") that runs faster or slower with Speed, so speed changes never jump.
+const uint32_t FALL[6] = {
+  RGBW32(255, 14, 0, 0),     // maple red
+  RGBW32(255, 58, 0, 0),     // pumpkin
+  RGBW32(255, 100, 0, 10),   // amber
+  RGBW32(255, 145, 0, 30),   // gold
+  RGBW32(160, 0, 10, 0),     // cranberry
+  RGBW32(255, 175, 12, 70),  // harvest yellow
+};
+// Turning Leaves goes around this loop: gold, amber, pumpkin, maple red, cranberry, then back
+// through rust (cranberry into amber) to gold
+const uint8_t TURN_ORDER[6] = { 3, 2, 1, 0, 4, 2 };
+// Harvest Bulbs, along the string: maple red, gold, pumpkin, then a clear warm filament bulb
+const uint32_t HARVEST_BULBS[4] = { RGBW32(255, 14, 0, 6), RGBW32(255, 145, 0, 36), RGBW32(255, 58, 0, 6), RGBW32(255, 80, 0, 150) };
+constexpr uint8_t MAX_LEAVES = 24;
+
+struct Leaf { float x, v, ph, sway, flip, life, age; uint8_t col; };
+struct AutumnState {
+  uint32_t last, ct;                                  // fall time in whole ms (stays exact for weeks)
+  float rem, gust, rustleX, nextRustle;
+  uint8_t rustling, n;
+  Leaf leaf[MAX_LEAVES];
+};
+
+// a new leaf somewhere along the strip; the first ones start part-way through their drift
+void leafSpawn(Leaf &l, int len, uint8_t nc, bool first) {
+  l.x = hw_random16(len * 16) / 16.0f - 0.5f;
+  l.v = 0.7f + hw_random8() / 255.0f * 1.5f;      // pixels per fall-second before the wind
+  l.ph = hw_random8() / 40.0f;
+  l.sway = 2.2f + hw_random8() / 255.0f * 2.0f;  // back-and-forth flutter, radians per second
+  l.flip = 3.0f + hw_random8() / 255.0f * 4.0f;  // how fast it turns over (catching the light)
+  l.life = 5.0f + hw_random8() / 255.0f * 6.0f;  // seconds drifting before it lands
+  l.age = first ? hw_random8() / 255.0f * l.life : 0.0f;
+  l.col = hw_random8(nc);
+}
+
+void mode_autumn_harvest() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(AutumnState))) { staticFallback(); return; }
+  AutumnState *st = reinterpret_cast<AutumnState *>(SEGENV.data);
+  const uint32_t now = strip.now;
+  const uint32_t seed = 1 + SEGMENT.start * 7919u;   // each segment rustles differently
+  const float den = SEGMENT.intensity / 255.0f;
+  const float sp = 0.25f + SEGMENT.speed / 170.0f;   // fall time: Speed 128 = real time, 0 = a quarter, 255 = 1.75x
+  Rgbw col[6];
+  uint8_t nc = 0;
+  if (SEGMENT.check1) for (uint8_t s = 0; s < 3; s++) if (SEGCOLOR(s)) col[nc++] = unpackC(SEGCOLOR(s));
+  const bool mine = nc > 0;
+  if (!mine) { for (uint8_t k = 0; k < 6; k++) col[k] = unpackC(FALL[k]); nc = 6; }
+
+  const bool first = SEGENV.call == 0;
+  if (first) {
+    memset(st, 0, sizeof(AutumnState));
+    st->last = now; st->ct = 30000; st->nextRustle = 32.0f;
+  }
+  float dt = (now - st->last) / 1000.0f;
+  st->last = now;
+  if (dt > 0.2f) dt = 0.2f;                          // paused: don't catch up
+  const float adv = dt * sp * 1000.0f + st->rem;
+  st->ct += (uint32_t)adv;
+  st->rem = adv - (uint32_t)adv;
+  const float ft = st->ct / 1000.0f, fdt = dt * sp;
+  // noise inputs from fall time, through uint32 so they wrap instead of overflowing the float conversion
+  auto tq = [&](float k) { return (uint16_t)(uint32_t)(ft * k); };
+
+  // the wind: calm most of the time, a gust every so often
+  float g = (perlin8(tq(40.0f), (uint16_t)seed) / 255.0f - 0.5f) / 0.3f;
+  g = easeC(constrain(g, 0.0f, 1.0f));
+  st->gust += (g - st->gust) * min(1.0f, dt * 3.0f);
+
+  // falling leaves
+  const int want = constrain((int)lroundf(len / 3.2f * (0.3f + den)), 2, (int)MAX_LEAVES);
+  while (st->n < want) leafSpawn(st->leaf[st->n++], len, nc, first);
+  if (st->n > want) st->n = want;
+  const float wind = 0.55f + 2.2f * st->gust;
+  for (uint8_t k = 0; k < st->n; k++) {
+    Leaf &l = st->leaf[k];
+    l.age += fdt;
+    if (l.age < l.life) l.x += l.v * wind * fdt;
+    if (l.age > l.life + 2.6f || l.x > len + 1.5f) leafSpawn(l, len, nc, false);
+  }
+  // turning leaves: a gust running down the strip now and then (more Leaves = more often)
+  if (!st->rustling && ft >= st->nextRustle) { st->rustling = 1; st->rustleX = -4.0f; }
+  if (st->rustling) {
+    st->rustleX += 10.0f * fdt;
+    if (st->rustleX > len + 4) { st->rustling = 0; st->nextRustle = ft + 4.0f + (1.0f - den) * 10.0f + hw_random8() / 255.0f * 5.0f; }
+  }
+
+  auto falling = [&](int i) -> Rgbw {
+    const float nz = perlin8((uint16_t)(i * 70 + seed), tq(25.0f)) / 255.0f;
+    Rgbw c = { 255.0f * (0.07f + 0.06f * nz), 255.0f * (0.018f + 0.016f * nz), 0.0f, 5.0f };   // a low ember glow
+    for (uint8_t k = 0; k < st->n; k++) {
+      const Leaf &l = st->leaf[k];
+      const bool down = l.age >= l.life;
+      const float fade = min(1.0f, l.age / 0.7f) * (down ? max(0.0f, 1.0f - (l.age - l.life) / 2.6f) : 1.0f);
+      if (fade <= 0.0f) continue;
+      const float xd = down ? l.x : l.x + sinf(l.age * l.sway + l.ph) * 0.55f;
+      const float w = 1.0f - fabsf(i - xd) / 1.5f;
+      if (w <= 0.0f) continue;
+      const float face = 0.5f + 0.5f * sinf(l.age * l.flip + l.ph * 2.0f);
+      const float k2 = w * fade * (down ? 0.6f : 0.62f + 0.38f * face * face);
+      const Rgbw &lc = col[l.col % nc];
+      c.r += lc.r * k2; c.g += lc.g * k2; c.b += lc.b * k2; c.w += lc.w * k2;
+    }
+    return c;
+  };
+  auto turning = [&](int i) -> Rgbw {
+    // where this leaf is in its turn: neighbours drift together, each with its own lag
+    float u = perlin8((uint16_t)(i * 48 + seed), tq(6.0f)) / 255.0f * 1.6f + h01(i, seed, 11) * 0.5f + (st->ct % 100000) * 1e-5f;
+    u -= floorf(u);
+    Rgbw c;
+    if (mine) { const float v = u * nc; const int a = (int)v % nc; c = mixC(col[a], col[(a + 1) % nc], easeC(v - (int)v)); }
+    else { const float v = u * 6; const int a = (int)v % 6; c = mixC(col[TURN_ORDER[a]], col[TURN_ORDER[(a + 1) % 6]], easeC(v - (int)v)); }
+    float bri = 0.62f + 0.38f * perlin8((uint16_t)(i * 97 + 500), tq(90.0f)) / 255.0f;   // rustling
+    if (st->rustling) {
+      const float d = i - st->rustleX, w = expf(-d * d / 6.0f);
+      bri += 0.5f * w;
+      if (w > 0.3f && h01(i, now / 70, seed + 12) < 0.35f) c.w += 90.0f * w;   // light glinting through
+    }
+    return scaleC(c, bri);
+  };
+  auto bulbs = [&](int i) -> Rgbw {
+    const uint8_t n = mine ? nc : 4;
+    auto bc = [&](int64_t k) { k %= n; if (k < 0) k += n; return mine ? col[k] : unpackC(HARVEST_BULBS[k]); };
+    // the colors step one bulb toward the end every 6 fall-seconds, crossfading over 1.2 s
+    const int64_t s = st->ct / 6000;
+    float f = (st->ct % 6000) / 1200.0f;
+    f = f >= 1.0f ? 1.0f : easeC(f);
+    Rgbw c = mixC(bc(i - s + 1), bc(i - s), f);
+    // filament: each bulb glows a little unevenly, with a faint flicker
+    float bri = 0.82f + 0.13f * perlin8((uint16_t)(i * 83 + seed), tq(20.0f)) / 255.0f
+              + 0.05f * h01(i, now / 90, seed + 5);
+    const uint32_t L = 1100, t = now + (uint32_t)(h01(i, seed, 6) * L), slot = t / L;
+    if (h01(i, slot, seed + 7) < den * 0.16f) {      // a twinkle
+      const float e = sinf(3.14159f * (t % L) / L);
+      bri += 0.3f * e * e; c.w += 120.0f * e * e;
+    }
+    return scaleC(c, bri);
+  };
+  auto look = [&](uint8_t which, int i) -> Rgbw {
+    switch (which) { case 0: return falling(i); case 1: return turning(i); default: return bulbs(i); }
+  };
+
+  const uint8_t lk = SEGMENT.custom1 >> 6;          // 0 falling, 1 turning, 2 bulbs, 3 tour
+  uint8_t a = lk, b = 255;
+  float kf = 1.0f;
+  if (lk == 3) {                                     // tour: 20 s each, 1.4 s crossfade from the last one
+    const uint32_t per = 20000, f = now % per;
+    a = (now / per) % 3;
+    if (f < 1400) { b = (a + 2) % 3; kf = f / 1400.0f; }
+  }
+  for (int i = 0; i < len; i++) {
+    Rgbw c = look(a, i);
+    if (b != 255) c = mixC(look(b, i), c, kf);
+    SEGMENT.setPixelColor(i, packC(c));
+  }
+}
+const char _data_autumn_harvest[] PROGMEM =
+  "Autumn Harvest@Speed,Leaves,Look,,,My colors;!,!,!;;1;sx=128,ix=128,c1=255,o1=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -1668,6 +1844,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_showgirl_sparkle,  _data_showgirl_sparkle);
     add(&mode_candy_land,        _data_candy_land);       // 237
     add(&mode_ucf_knights,       _data_ucf_knights);      // 238 (sound reactive)
+    add(&mode_autumn_harvest,    _data_autumn_harvest);   // 239
   }
 
   void loop() override {}
