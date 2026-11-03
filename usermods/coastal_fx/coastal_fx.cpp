@@ -2078,13 +2078,13 @@ void mode_star_wars() {
   };
   auto blasters = [&](int i) -> Rgbw {
     Rgbw c = { 2, 3, 9, 0 };                                                     // smoke in the dark
-    const Rgbw RED = { 255, 10, 0, 30 }, GRN = { 20, 255, 0, 20 }, FIRE = { 255, 110, 10, 60 };
+    const Rgbw BOLT_R = { 255, 10, 0, 30 }, BOLT_G = { 20, 255, 0, 20 }, FIRE = { 255, 110, 10, 60 };
     for (uint8_t k = 0; k < s->nBolts; k++) {
       const SwBolt &q = s->bolts[k];
       const float dd = (q.x - i) * (q.v > 0 ? 1.0f : -1.0f);                    // behind the head
       if (dd < -0.6f || dd > 3.0f) continue;
       const float w = dd < 0 ? 1.0f + dd / 0.6f : powf(1.0f - dd / 3.0f, 1.5f);
-      add(c, q.side ? GRN : RED, w);
+      add(c, q.side ? BOLT_G : BOLT_R, w);
       c.w += 50.0f * w * (dd < 0.5f);
     }
     for (uint8_t k = 0; k < s->nBooms; k++) {
