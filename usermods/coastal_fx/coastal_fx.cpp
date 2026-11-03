@@ -27,6 +27,7 @@
  *   Candy Land (237) - candy colors and white frosting: Candy Path, Gumdrop Pop, Lollipop Swirl
  *   UCF Knights (238)- black and gold game day that moves to sound (mic): Charge On, Bounce House, Crowd Roar
  *   Autumn Harvest (239) - fall colors: Falling Leaves, Turning Leaves, Harvest Bulbs
+ *   Star Wars (240)  - Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns
  *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
@@ -1807,6 +1808,361 @@ void mode_autumn_harvest() {
 const char _data_autumn_harvest[] PROGMEM =
   "Autumn Harvest@Speed,Leaves,Look,,,My colors;!,!,!;;1;sx=128,ix=128,c1=255,o1=0";
 
+
+// ================================================================ Star Wars (240)
+// A galaxy far, far away, in four looks picked with the Look slider (in fifths):
+//   0-50    Lightsaber Duel - a blue saber ignites from pixel 1 and a red one from the far end. They
+//                             meet in the middle and fight: strikes that clash in white-hot flashes
+//                             with sparks flying, flurries, blade locks that crackle while one pushes
+//                             the other back, stepping apart to circle. Then the finale: the loser's
+//                             blade goes out, the winner's after it, and the next duel starts with a
+//                             new hero color (blue, green, purple)
+//   51-101  Blaster Fight   - red bolts from one end and green ones from the other, hitting cover and
+//                             exploding at the far end; now and then a blue saber lights up in the
+//                             middle and sends the green bolts back where they came from
+//   102-152 Hyperspace      - drifting stars stretch into streaks, a flash, and the jump: blue and
+//                             white hyperspace rushing along the strip, then back out to the stars
+//   153-203 Twin Suns       - a desert sunset: two suns sliding slowly along the strip in a gold,
+//                             coral and deep purple sky (a calm one for the whole evening)
+//   204-255 Tour            - the four in turn, 25 s each, each from its beginning (the default)
+//   Speed, Action (how fierce: how often they strike and shoot, how many sparks and stars), Look
+//   Checkbox "My colors": slot 1 = the hero's saber, slot 2 = the villain's saber
+// Everything travels toward the end of the segment, on its own clock ("star time") that runs
+// faster or slower with Speed.
+const uint32_t SW_HERO[3] = { RGBW32(0, 70, 255, 0), RGBW32(0, 255, 40, 0), RGBW32(150, 0, 255, 0) };   // blue, green, purple
+constexpr uint32_t SW_VILLAIN = RGBW32(255, 0, 0, 0);
+constexpr uint8_t SW_SPARKS = 28, SW_BOLTS = 14, SW_BOOMS = 6, SW_STARS = 24;
+struct SwSpark { float x, v, life, max; };
+struct SwBolt { float x, v, stop; uint8_t side; };
+struct SwBoom { float x, t, p; };
+enum : uint8_t { SD_DARK, SD_IGN_H, SD_IGN_V, SD_SQUARE, SD_FIGHT, SD_FINALE, SD_LOSE_OFF, SD_WIN_HOLD, SD_WIN_OFF };
+enum : uint8_t { SM_STRIKE, SM_LOCK, SM_BACK };
+struct StarWarsState {
+  uint32_t last, st;                                  // star time in whole ms
+  float rem;
+  uint8_t look;                                       // the look that's running (to start each from the top)
+  // duel: the blades meet around c with a gap g between the tips; fh, fv = how far each is lit
+  uint8_t phase, move, flurry, contact, winner, duels, nSparks;
+  uint32_t moveEnd, fightEnd, ignH, ignV, clashT;
+  float c, g, cT, gT, rate, fh, fv, push, clashX, clashP;
+  SwSpark sparks[SW_SPARKS];
+  // blaster fight
+  uint8_t nBolts, nBooms;
+  SwBolt bolts[SW_BOLTS];
+  SwBoom booms[SW_BOOMS];
+  float jediX, jediT, nextJedi;
+  // hyperspace
+  uint32_t hyperAt;
+  float dist, flow;
+};
+
+inline float swRnd() { return hw_random16() / 65536.0f; }
+void swSparks(StarWarsState *s, float x, int n, float power) {
+  for (int k = 0; k < n && s->nSparks < SW_SPARKS; k++) {
+    SwSpark &p = s->sparks[s->nSparks++];
+    p.x = x; p.v = (swRnd() < 0.5f ? -1.0f : 1.0f) * (4.0f + swRnd() * 12.0f) * power;
+    p.max = p.life = 0.25f + swRnd() * 0.4f;
+  }
+}
+
+void mode_star_wars() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(StarWarsState))) { staticFallback(); return; }
+  StarWarsState *s = reinterpret_cast<StarWarsState *>(SEGENV.data);
+  const uint32_t now = strip.now;
+  const uint32_t seed = 1 + SEGMENT.start * 7919u;
+  const float L = len, mid = L * 0.5f - 0.5f;
+  const float act = SEGMENT.intensity / 255.0f;
+  const float sp = 0.25f + SEGMENT.speed / 170.0f;   // Speed 128 = real time
+  if (SEGENV.call == 0) {
+    memset(s, 0, sizeof(StarWarsState));
+    s->last = now; s->st = 100000; s->look = 255; s->nextJedi = 4.0f; s->jediT = -1.0f;
+    s->phase = SD_DARK; s->moveEnd = s->st + 600; s->c = mid; s->g = L * 0.3f;
+  }
+  float dt = (now - s->last) / 1000.0f;
+  s->last = now;
+  if (dt > 0.2f) dt = 0.2f;
+  const float adv = dt * sp * 1000.0f + s->rem;
+  s->st += (uint32_t)adv;
+  s->rem = adv - (uint32_t)adv;
+  const float fdt = dt * sp;
+  const uint32_t T = s->st;
+
+  // which look (Tour: 25 s each with a 1.5 s crossfade); a look that just came up starts from the top
+  const uint8_t lk = (uint16_t)SEGMENT.custom1 * 5 >> 8;   // 0 duel, 1 blasters, 2 hyperspace, 3 suns, 4 tour
+  uint8_t a = lk, b = 255;
+  float kf = 1.0f;
+  if (lk == 4) {
+    const uint32_t per = 25000, f = now % per;
+    a = (now / per) % 4;
+    if (f < 1500) { b = (a + 3) % 4; kf = f / 1500.0f; }
+  }
+  if (a != s->look) {
+    if (a == 0) { s->phase = SD_DARK; s->moveEnd = T + 500; s->fh = s->fv = 0; s->nSparks = 0; }
+    if (a == 2) s->hyperAt = T - 1500;                // the jump comes about 3 s in
+    s->look = a;
+  }
+
+  // ---------------- the duel
+  Rgbw hero = unpackC(SW_HERO[s->duels % 3]), villain = unpackC(SW_VILLAIN);
+  if (SEGMENT.check1 && SEGCOLOR(0)) hero = unpackC(SEGCOLOR(0));
+  if (SEGMENT.check1 && SEGCOLOR(1)) villain = unpackC(SEGCOLOR(1));
+  auto clash = [&](float power) {
+    s->clashX = s->c; s->clashT = T; s->clashP = power;
+    swSparks(s, s->c, 2 + (int)(power * (3.0f + 6.0f * act)), power);
+  };
+  auto pickMove = [&]() {
+    const float r = swRnd(), pause = 1.0f - 0.55f * act;   // more Action, quicker moves
+    if (s->flurry) {                                     // a flurry: quick strikes in a row
+      s->flurry--; s->move = SM_STRIKE; s->cT = mid + (swRnd() - 0.5f) * L * 0.2f; s->gT = 0; s->rate = 22;
+      s->moveEnd = T + 260 + hw_random16(120);
+    } else if (r < 0.42f) {                              // a strike: blades swing in and clash
+      s->move = SM_STRIKE; s->cT = mid + (swRnd() - 0.5f) * L * 0.24f; s->gT = 0; s->rate = 15;
+      s->moveEnd = T + (uint32_t)((450 + hw_random16(500)) * pause) + 250;
+    } else if (r < 0.6f) {
+      s->flurry = 2 + hw_random8(3); s->moveEnd = T;     // starts on the next frame
+    } else if (r < 0.8f) {                               // a blade lock: pushing, crackling
+      s->move = SM_LOCK; s->cT = mid + (swRnd() - 0.5f) * L * 0.16f; s->gT = 0; s->rate = 10;
+      s->push = (swRnd() < 0.5f ? -1.0f : 1.0f) * (0.6f + swRnd() * 1.2f);
+      s->moveEnd = T + 1400 + hw_random16(1200);
+    } else {                                             // step apart and circle
+      s->move = SM_BACK; s->cT = mid + (swRnd() - 0.5f) * L * 0.1f; s->gT = L * (0.16f + swRnd() * 0.14f); s->rate = 4;
+      s->moveEnd = T + (uint32_t)((900 + hw_random16(700)) * pause);
+    }
+  };
+  switch (s->phase) {
+    case SD_DARK:
+      s->fh = s->fv = 0;
+      if (T >= s->moveEnd) { s->phase = SD_IGN_H; s->c = s->cT = mid; s->g = s->gT = L * 0.28f; s->ignH = T; s->moveEnd = T + 600; }
+      break;
+    case SD_IGN_H:
+      if (T >= s->moveEnd) { s->phase = SD_IGN_V; s->ignV = T; s->moveEnd = T + 800; }
+      break;
+    case SD_IGN_V:
+      if (T >= s->moveEnd) { s->phase = SD_SQUARE; s->moveEnd = T + 700; }
+      break;
+    case SD_SQUARE:
+      if (T >= s->moveEnd) { s->phase = SD_FIGHT; s->fightEnd = T + 15000 + hw_random16(4000); s->moveEnd = T; }
+      break;
+    case SD_FIGHT:
+      if (T >= s->fightEnd && s->move != SM_LOCK) {      // the finale: the winner drives the other back
+        s->phase = SD_FINALE; s->winner = hw_random8(2); s->gT = 0; s->rate = 3.5f;
+        s->cT = s->winner == 0 ? L * 0.8f : L * 0.2f; s->moveEnd = T + 1700; s->flurry = 0;
+      } else if (T >= s->moveEnd) {
+        if (s->move == SM_LOCK && s->contact) { clash(1.0f); s->gT = 3.0f + swRnd() * 3.0f; s->rate = 9; }   // shoved apart
+        pickMove();
+      }
+      break;
+    case SD_FINALE:
+      if (T >= s->moveEnd) { clash(1.3f); s->phase = SD_LOSE_OFF; s->moveEnd = T + 700; }
+      break;
+    case SD_LOSE_OFF:
+      if (T >= s->moveEnd) { s->phase = SD_WIN_HOLD; s->moveEnd = T + 1500; }
+      break;
+    case SD_WIN_HOLD:
+      if (T >= s->moveEnd) { s->phase = SD_WIN_OFF; s->moveEnd = T + 700; }
+      break;
+    case SD_WIN_OFF:
+      if (T >= s->moveEnd) { s->phase = SD_DARK; s->moveEnd = T + 1500; s->duels++; }
+      break;
+  }
+  // blades follow their targets; ignition and retraction take ~0.35 s
+  const float ign = fdt / 0.35f;
+  if (s->phase >= SD_IGN_H && s->phase <= SD_FINALE) s->fh = min(1.0f, s->fh + ign);
+  if (s->phase >= SD_IGN_V && s->phase <= SD_FINALE) s->fv = min(1.0f, s->fv + ign);
+  if (s->phase == SD_LOSE_OFF || s->phase == SD_WIN_HOLD) { float &f = s->winner == 0 ? s->fv : s->fh; f = max(0.0f, f - fdt / 0.45f); }
+  if (s->phase == SD_WIN_OFF) { s->fh = max(0.0f, s->fh - fdt / 0.45f); s->fv = max(0.0f, s->fv - fdt / 0.45f); }
+  if (s->phase == SD_DARK) s->fh = s->fv = 0;
+  if (s->move == SM_LOCK && s->phase == SD_FIGHT && s->contact) s->cT += s->push * fdt + (swRnd() - 0.5f) * 0.3f;
+  s->cT = constrain(s->cT, 2.0f, L - 3.0f);
+  const float kk = min(1.0f, s->rate * fdt);
+  s->c += (s->cT - s->c) * kk;
+  s->g += (s->gT - s->g) * kk;
+  const bool fighting = s->phase == SD_FIGHT || s->phase == SD_FINALE;
+  if (fighting && s->g < 0.4f && !s->contact) {
+    s->contact = 1;
+    clash(s->move == SM_LOCK ? 0.7f : s->flurry ? 0.6f : 0.85f);
+    if (s->move == SM_STRIKE) { s->gT = 1.5f + swRnd() * 2.5f; s->rate = 9; }   // recoil
+  }
+  if (s->g > 0.9f) s->contact = 0;
+  if (fighting && s->contact && (s->move == SM_LOCK || s->phase == SD_FINALE) && hw_random8() < 50 + 80 * act) {
+    swSparks(s, s->c + (swRnd() - 0.5f), 1, 0.5f);       // crackle
+    if (hw_random8() < 90) { s->clashX = s->c; s->clashT = T; s->clashP = 0.35f + 0.3f * swRnd(); }
+  }
+  for (uint8_t k = 0; k < s->nSparks; ) {
+    SwSpark &p = s->sparks[k];
+    p.x += p.v * fdt; p.v *= max(0.0f, 1.0f - 2.5f * fdt); p.life -= fdt;
+    if (p.life <= 0 || p.x < -2 || p.x > L + 1) s->sparks[k] = s->sparks[--s->nSparks]; else k++;
+  }
+
+  // ---------------- the blaster fight
+  {
+    const float rate = (0.35f + 1.8f * act) * fdt;      // bolts per side per star-second
+    for (uint8_t side = 0; side < 2; side++) {
+      if (s->nBolts < SW_BOLTS && swRnd() < rate) {
+        SwBolt &q = s->bolts[s->nBolts++];
+        q.side = side; q.x = side ? L - 0.5f : -0.5f;
+        q.v = (side ? -1.0f : 1.0f) * (26.0f + swRnd() * 16.0f);
+        q.stop = swRnd() < 0.3f ? L * (0.3f + swRnd() * 0.4f) : (side ? -0.5f : L - 0.5f);   // cover, or the far end
+      }
+    }
+    if (s->jediT < 0.0f || s->jediT > 6.0f) {
+      s->jediT = -1.0f;
+      if ((s->nextJedi -= fdt) <= 0.0f) { s->jediT = 0.0f; s->jediX = L * (0.3f + swRnd() * 0.25f); s->nextJedi = 9.0f + swRnd() * 8.0f; }
+    } else s->jediT += fdt;
+    const bool jedi = s->jediT >= 0.3f && s->jediT <= 5.6f;
+    auto boom = [&](float x, float p) {
+      if (s->nBooms < SW_BOOMS) { SwBoom &o = s->booms[s->nBooms++]; o.x = x; o.t = 0; o.p = p; }
+      swSparks(s, x, 2 + (int)(3 * p), 0.6f);
+    };
+    for (uint8_t k = 0; k < s->nBolts; ) {
+      SwBolt &q = s->bolts[k];
+      const float was = q.x;
+      q.x += q.v * fdt;
+      if (jedi && q.side == 1 && q.v < 0 && was >= s->jediX + 2.0f && q.x < s->jediX + 2.0f) {   // deflected
+        q.v = -q.v; q.x = s->jediX + 2.0f; q.stop = L - 0.5f;
+        s->clashX = q.x; s->clashT = T; s->clashP = 0.6f;
+      }
+      const bool hit = q.v > 0 ? q.x >= q.stop : q.x <= q.stop;
+      if (hit) { boom(q.stop, q.stop > 0.5f && q.stop < L - 1.0f ? 0.55f : 1.0f); s->bolts[k] = s->bolts[--s->nBolts]; } else k++;
+    }
+    for (uint8_t k = 0; k < s->nBooms; ) {
+      SwBoom &o = s->booms[k];
+      o.t += fdt;
+      if (o.t > 0.9f) s->booms[k] = s->booms[--s->nBooms]; else k++;
+    }
+  }
+
+  // ---------------- hyperspace (a 17 s cycle: cruise, stretch, flash, tunnel, drop out)
+  const uint32_t h = (T - s->hyperAt) % 17000;
+  float hs;                                             // how fast the stars go by
+  if (h < 4500 || h >= 15000) hs = 1.0f;
+  else if (h < 6500) { const float u = (h - 4500) / 2000.0f; hs = 1.0f + 90.0f * u * u * u; }
+  else if (h < 13500) hs = 91.0f;
+  else { const float u = 1.0f - (h - 13500) / 1500.0f; hs = 1.0f + 90.0f * u * u; }
+  s->dist += hs * fdt;
+  if (s->dist > 1.0e6f) s->dist -= 1.0e6f;
+  s->flow += fdt * 45.0f;
+  if (s->flow > 1.0e5f) s->flow -= 1.0e5f;
+
+  // ---------------- drawing
+  const float tipH = -0.5f + s->fh * (s->c - s->g * 0.5f + 0.5f);
+  const float tipV = (L - 0.5f) - s->fv * ((L - 0.5f) - (s->c + s->g * 0.5f));
+  const float flash = s->clashP * expf(-(float)(T - s->clashT) / 90.0f);
+  auto add = [](Rgbw &c, const Rgbw &d, float k) { c.r += d.r * k; c.g += d.g * k; c.b += d.b * k; c.w += d.w * k; };
+  const Rgbw HOT = { 255, 210, 160, 255 }, SPARK_C = { 255, 140, 30, 90 };
+  auto sparkle = [&](Rgbw &c, int i) {
+    for (uint8_t k = 0; k < s->nSparks; k++) {
+      const SwSpark &p = s->sparks[k];
+      const float w = 1.0f - fabsf(i - p.x);
+      if (w > 0) add(c, SPARK_C, w * p.life / p.max);
+    }
+  };
+  auto duel = [&](int i) -> Rgbw {
+    Rgbw c = { 0, 0, 0, 0 };
+    for (uint8_t side = 0; side < 2; side++) {
+      const float cov = side == 0 ? constrain(tipH - i + 0.5f, 0.0f, 1.0f) : constrain(i - tipV + 0.5f, 0.0f, 1.0f);
+      if (cov <= 0) continue;
+      const uint32_t ig = side == 0 ? s->ignH : s->ignV;
+      float bri = 0.84f + 0.1f * perlin8((uint16_t)(i * 30 + side * 5000), (uint16_t)(now / 3)) / 255.0f
+                + 0.06f * sinf(now * 0.06f + side * 2.0f);                       // the hum
+      if (T - ig < 600) bri += 0.3f * expf(-(float)(T - ig) / 150.0f);           // snap-hiss on ignition
+      bri *= 1.0f + 0.35f * flash;
+      add(c, side == 0 ? hero : villain, cov * bri);
+      c.w += 30.0f * cov * bri;                                                  // the white core
+    }
+    const float d = fabsf(i - s->clashX);
+    if (flash > 0.02f && d < 2.5f) add(c, HOT, flash * (1.0f - d / 2.5f));
+    sparkle(c, i);
+    return c;
+  };
+  auto blasters = [&](int i) -> Rgbw {
+    Rgbw c = { 2, 3, 9, 0 };                                                     // smoke in the dark
+    const Rgbw RED = { 255, 10, 0, 30 }, GRN = { 20, 255, 0, 20 }, FIRE = { 255, 110, 10, 60 };
+    for (uint8_t k = 0; k < s->nBolts; k++) {
+      const SwBolt &q = s->bolts[k];
+      const float dd = (q.x - i) * (q.v > 0 ? 1.0f : -1.0f);                    // behind the head
+      if (dd < -0.6f || dd > 3.0f) continue;
+      const float w = dd < 0 ? 1.0f + dd / 0.6f : powf(1.0f - dd / 3.0f, 1.5f);
+      add(c, q.side ? GRN : RED, w);
+      c.w += 50.0f * w * (dd < 0.5f);
+    }
+    for (uint8_t k = 0; k < s->nBooms; k++) {
+      const SwBoom &o = s->booms[k];
+      const float r = 0.8f + min(2.4f, o.t * 7.0f), d = fabsf(i - o.x);
+      if (d > r) continue;
+      const float e = o.p * expf(-o.t / 0.22f) * (1.0f - d / (r + 0.01f));
+      add(c, o.t < 0.08f ? HOT : FIRE, e);
+    }
+    if (s->jediT >= 0.0f) {                                                      // the Jedi's saber, 5 px
+      const float on = constrain(s->jediT / 0.3f, 0.0f, 1.0f) * constrain((6.0f - s->jediT) / 0.3f, 0.0f, 1.0f);
+      const float half = 2.5f * on, d = fabsf(i - s->jediX);
+      const float cov = constrain(half - d + 0.5f, 0.0f, 1.0f);
+      if (cov > 0) {
+        const float bri = 0.85f + 0.15f * perlin8((uint16_t)(i * 40), (uint16_t)(now / 3)) / 255.0f;
+        add(c, unpackC(SW_HERO[0]), cov * bri); c.w += 30.0f * cov * bri;
+      }
+    }
+    const float d = fabsf(i - s->clashX);
+    if (flash > 0.02f && d < 2.0f) add(c, HOT, flash * (1.0f - d / 2.0f));
+    sparkle(c, i);
+    return c;
+  };
+  auto hyperspace = [&](int i) -> Rgbw {
+    Rgbw c = { 0, 0, 3, 0 };
+    const bool tunnel = h >= 6500 && h < 14200;
+    float starK = h < 6500 ? 1.0f : h < 13500 ? 0.0f : constrain((h - 13500) / 400.0f, 0.0f, 1.0f);
+    if (starK > 0) {
+      const int n = constrain((int)(L / 3.0f * (0.5f + act)), 4, (int)SW_STARS);
+      const Rgbw STAR = { 140, 170, 255, 120 };
+      for (int j = 0; j < n; j++) {
+        const float depth = 0.5f + h01(j, seed, 22), bri = 0.3f + 0.7f * h01(j, seed, 23);
+        float x = fmodf(h01(j, seed, 21) * (L + 6.0f) + s->dist * depth, L + 6.0f) - 3.0f;
+        const float sl = 0.4f + min(10.0f, (hs - 1.0f) * 0.2f) * depth;          // streak length
+        const float dd = x - i;
+        if (dd < -0.7f || dd > sl + 0.7f) continue;
+        const float w = dd < 0 ? 1.0f + dd / 0.7f : (dd < sl ? 1.0f - 0.7f * dd / (sl + 0.01f) : 0.3f * (1.0f - (dd - sl) / 0.7f));
+        const float tw = 0.65f + 0.35f * perlin8((uint16_t)(j * 900), (uint16_t)(now / 4)) / 255.0f;
+        add(c, STAR, w * bri * tw * starK * min(1.0f, 0.7f + hs * 0.01f) / (1.0f + sl * 0.12f));
+      }
+    }
+    if (tunnel) {
+      const float in = constrain((h - 6500) / 300.0f, 0.0f, 1.0f), out = constrain((14200 - (float)h) / 700.0f, 0.0f, 1.0f);
+      const float u = i * 0.2f - s->flow * 0.2f;
+      const float n1 = perlin8((uint16_t)(int32_t)(u * 256.0f), (uint16_t)(now / 5)) / 255.0f;
+      const float band = constrain((n1 - 0.42f) / 0.33f, 0.0f, 1.0f);
+      Rgbw t = { 0, 18, 90, 0 };
+      add(t, Rgbw{ 60, 150, 255, 90 }, band * band);
+      if (h01(i, now / 60, seed + 24) < 0.06f + 0.06f * act) t.w += 160.0f;     // glints rushing by
+      add(c, t, in * out);
+    }
+    if (h >= 6500 && h < 7300) add(c, Rgbw{ 150, 180, 255, 255 }, expf(-(h - 6500) / 160.0f));   // the jump
+    if (h >= 13500 && h < 14000) add(c, Rgbw{ 120, 150, 255, 200 }, 0.6f * expf(-(h - 13500) / 120.0f));
+    return c;
+  };
+  auto suns = [&](int i) -> Rgbw {
+    const float span = L + 14.0f, p1 = fmodf(T / 100000.0f * span, span) - 7.0f, p2 = p1 - L * 0.13f - 1.5f;
+    const float d = min(fabsf(i - p1), fabsf(i - p2)) / max(10.0f, L * 0.45f);
+    const Rgbw GOLD = { 255, 110, 8, 30 }, CORAL = { 230, 40, 50, 0 }, DUSK = { 50, 12, 100, 0 }, NIGHT = { 14, 4, 48, 0 };
+    Rgbw c = d < 0.5f ? mixC(GOLD, CORAL, d * 2.0f) : d < 1.0f ? mixC(CORAL, DUSK, (d - 0.5f) * 2.0f)
+           : mixC(DUSK, NIGHT, constrain((d - 1.0f) / 0.6f, 0.0f, 1.0f));
+    c = scaleC(c, 0.88f + 0.12f * perlin8((uint16_t)(i * 60 + seed), (uint16_t)(T / 40)) / 255.0f);   // heat shimmer
+    add(c, Rgbw{ 255, 190, 110, 190 }, expf(-(i - p1) * (i - p1) / 0.9f));
+    add(c, Rgbw{ 255, 140, 50, 110 }, expf(-(i - p2) * (i - p2) / 0.6f));
+    return c;
+  };
+  auto look = [&](uint8_t which, int i) -> Rgbw {
+    switch (which) { case 0: return duel(i); case 1: return blasters(i); case 2: return hyperspace(i); default: return suns(i); }
+  };
+  for (int i = 0; i < len; i++) {
+    Rgbw c = look(a, i);
+    if (b != 255) c = mixC(look(b, i), c, kf);
+    SEGMENT.setPixelColor(i, packC(c));
+  }
+}
+const char _data_star_wars[] PROGMEM =
+  "Star Wars@Speed,Action,Look,,,My colors;Hero,Villain,!;;1;sx=128,ix=128,c1=255,o1=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -1845,6 +2201,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_candy_land,        _data_candy_land);       // 237
     add(&mode_ucf_knights,       _data_ucf_knights);      // 238 (sound reactive)
     add(&mode_autumn_harvest,    _data_autumn_harvest);   // 239
+    add(&mode_star_wars,         _data_star_wars);        // 240
   }
 
   void loop() override {}

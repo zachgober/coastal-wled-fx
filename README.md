@@ -1,6 +1,6 @@
 # Coastal FX — custom WLED effects
 
-Twenty custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+Twenty-one custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
 
 **Direction:** everything that travels (bulbs, stripes, waves, chases, reels, candy) moves from the
 segment's first pixel toward its last, the same way WLED's own chases run. To make a strip run the
@@ -91,14 +91,31 @@ Controls: Speed, **Leaves** (how many leaves, how often a gust comes, how many t
 **My colors** (the leaf and bulb colors from slots 1–3). Like Candy Land it keeps its own clock,
 so speed changes are smooth.
 
+### Star Wars (id 240)
+
+![Star Wars](effect-preview-star-wars.png)
+
+*Time runs down, pixels across: one Lightsaber Duel (ignition to finale), Blaster Fight, Hyperspace, Twin Suns.*
+
+| Look (slider) | What it does |
+|---|---|
+| Lightsaber Duel (0–50) | A blue saber ignites from pixel 1 (snap and flash) and a red one from the far end. They meet in the middle and fight: strikes that clash in white-hot flashes with sparks flying, quick flurries, blade locks that crackle while one pushes the other back, stepping apart to circle. After 15–19 s the finale: the winner drives the other back, the loser's blade goes out, then the winner's. The next duel brings a new hero color (blue, green, purple) |
+| Blaster Fight (51–101) | Red bolts from one end and green ones from the other, hitting cover mid-strip and exploding at the far end. Every 9–17 s a blue saber lights up in the middle for a few seconds and sends the green bolts back |
+| Hyperspace (102–152) | Drifting stars stretch into streaks, a flash, and the jump: blue and white hyperspace rushing along the strip, then back out to the stars (a 17 s cycle) |
+| Twin Suns (153–203) | A desert sunset: two suns sliding slowly along the strip in a gold, coral and deep purple sky. The calm one |
+| Tour (204–255, default) | The four in turn, 25 seconds each; each starts from its beginning, so the duel always opens with the ignition |
+
+Controls: Speed, **Action** (how often they strike and shoot, how many sparks and stars), Look,
+**My colors** (slot 1 = the hero's saber, slot 2 = the villain's). Each segment fights its own duel.
+
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–239** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-239" when the firmware is running.
+Effect IDs on this build: **220–240** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-240" when the firmware is running.
 
 ## Build (GitHub, no software to install)
 
@@ -122,14 +139,14 @@ Effect IDs on this build: **220–239** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-239".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-240".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) and the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs),
+   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs) and the Star Wars scenes (88–92: Star Wars, Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns),
    plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
    since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
-   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights and Autumn Harvest.)
+   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights, Autumn Harvest and Star Wars.)
 
 ## Changing an effect
 
