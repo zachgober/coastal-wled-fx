@@ -28,6 +28,10 @@
  *   UCF Knights (238)- black and gold game day that moves to sound (mic): Charge On, Bounce House, Crowd Roar
  *   Autumn Harvest (239) - fall colors: Falling Leaves, Turning Leaves, Harvest Bulbs
  *   Star Wars (240)  - Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns
+ *   Window matrix (2D, for the LED matrix in the office window):
+ *   Window Clock (241)   - big clock with an info line (weather, pool) from the segment name
+ *   Holiday Window (242) - animated scenes: Halloween, Thanksgiving, Christmas, Fireworks, Valentine's,
+ *                          St. Patrick's, Coastal sunset; Auto picks the scene by the date
  *
  * Strips in step: every strip (segment) running the same effect at the same Speed keeps the
  * same timing, however far apart they were switched on: the clocks, tours, routines, game rounds
@@ -2332,6 +2336,683 @@ void mode_star_wars() {
 const char _data_star_wars[] PROGMEM =
   "Star Wars@Speed,Action,Look,,,My colors;Hero,Villain,!;;1;sx=128,ix=128,c1=255,o1=0";
 
+
+// ================================================================ Window matrix (2D, 241-242)
+// Effects for the LED matrix in the office window: a grid of SK6812 RGBW chips set up as a 2D
+// matrix in LED Preferences (24 x 24 planned). They draw on a 24 x 24 design grid that's scaled
+// to the matrix and centered, so they work on other sizes too. On a strip (1D) they show color 1.
+//   Window Clock (241)   - the time, big, with an info line (weather, pool...) from the segment name
+//   Holiday Window (242) - animated scenes: Halloween, Thanksgiving, Christmas, Fireworks,
+//                          Valentine's, St. Patrick's, Coastal sunset; Auto picks by the date
+// Both keep a float picture of the matrix (the canvas) and send it out once a frame.
+
+constexpr int WIN_MAX_PX = 4096;                     // up to 64 x 64
+
+struct Canvas {
+  int wd, ht;                                        // matrix pixels
+  float pu;                                          // design units per pixel (24 / the short side)
+  float ox, oy;                                      // pixels left/above the centered design square
+  Rgbw *fb;
+  // design units <-> pixels
+  float px(float u) const { return u / pu + ox - 0.5f; }
+  float py(float v) const { return v / pu + oy - 0.5f; }
+  float du(int x) const { return (x + 0.5f - ox) * pu; }
+  float dv(int y) const { return (y + 0.5f - oy) * pu; }
+};
+
+void cvInit(Canvas &cv, void *mem) {
+  cv.wd = SEG_W; cv.ht = SEG_H;
+  const int s = min(cv.wd, cv.ht);
+  cv.pu = 24.0f / s;
+  cv.ox = (cv.wd - s) * 0.5f; cv.oy = (cv.ht - s) * 0.5f;
+  cv.fb = reinterpret_cast<Rgbw *>(mem);
+}
+
+// paint every pixel from fn(u, v) in design units; small matrices get 2 x 2 samples per pixel so
+// round shapes come out smooth
+template <class Fn> void cvPaint(Canvas &cv, Fn fn) {
+  const bool ss = min(cv.wd, cv.ht) <= 40;
+  const float q = cv.pu * 0.25f;
+  for (int y = 0; y < cv.ht; y++) for (int x = 0; x < cv.wd; x++) {
+    const float u = cv.du(x), v = cv.dv(y);
+    Rgbw c;
+    if (ss) {
+      const Rgbw a = fn(u - q, v - q), b = fn(u + q, v - q), d = fn(u - q, v + q), e = fn(u + q, v + q);
+      c = { (a.r + b.r + d.r + e.r) * 0.25f, (a.g + b.g + d.g + e.g) * 0.25f, (a.b + b.b + d.b + e.b) * 0.25f, (a.w + b.w + d.w + e.w) * 0.25f };
+    } else c = fn(u, v);
+    cv.fb[x + y * cv.wd] = c;
+  }
+}
+
+inline void cvAt(Canvas &cv, int x, int y, const Rgbw &c, float k, bool over) {
+  if (x < 0 || y < 0 || x >= cv.wd || y >= cv.ht || k <= 0.0f) return;
+  Rgbw &p = cv.fb[x + y * cv.wd];
+  if (over) p = mixC(p, c, k > 1.0f ? 1.0f : k);
+  else { p.r += c.r * k; p.g += c.g * k; p.b += c.b * k; p.w += c.w * k; }
+}
+// a point at (u, v) spread over the 4 nearest pixels: added (light) or painted over (silhouettes)
+void cvDot(Canvas &cv, float u, float v, const Rgbw &c, float k, bool over = false) {
+  const float x = cv.px(u), y = cv.py(v);
+  const int x0 = (int)floorf(x), y0 = (int)floorf(y);
+  const float fx = x - x0, fy = y - y0;
+  cvAt(cv, x0, y0, c, k * (1 - fx) * (1 - fy), over);
+  cvAt(cv, x0 + 1, y0, c, k * fx * (1 - fy), over);
+  cvAt(cv, x0, y0 + 1, c, k * (1 - fx) * fy, over);
+  cvAt(cv, x0 + 1, y0 + 1, c, k * fx * fy, over);
+}
+// a soft glow of radius r (design units) added at (u, v)
+void cvGlow(Canvas &cv, float u, float v, const Rgbw &c, float k, float r) {
+  const float x = cv.px(u), y = cv.py(v), rp = r / cv.pu;
+  const int x0 = (int)floorf(x - rp * 2), x1 = (int)ceilf(x + rp * 2), y0 = (int)floorf(y - rp * 2), y1 = (int)ceilf(y + rp * 2);
+  const float inv = 1.0f / (rp * rp + 0.05f);
+  for (int yy = y0; yy <= y1; yy++) for (int xx = x0; xx <= x1; xx++) {
+    const float dx = xx - x, dy = yy - y;
+    cvAt(cv, xx, yy, c, k * expf(-(dx * dx + dy * dy) * inv), false);
+  }
+}
+// a line of dots from (u0, v0) to (u1, v1), painted over
+void cvLine(Canvas &cv, float u0, float v0, float u1, float v1, const Rgbw &c, float k) {
+  const float len = sqrtf((u1 - u0) * (u1 - u0) + (v1 - v0) * (v1 - v0)) / cv.pu;
+  const int n = 1 + (int)(len * 1.5f);
+  for (int i = 0; i <= n; i++) { const float f = (float)i / n; cvDot(cv, u0 + (u1 - u0) * f, v0 + (v1 - v0) * f, c, k, true); }
+}
+void cvFlush(const Canvas &cv) {
+  for (int y = 0; y < cv.ht; y++) for (int x = 0; x < cv.wd; x++) SEGMENT.setPixelColorXY(x, y, packC(cv.fb[x + y * cv.wd]));
+}
+
+// the window effects' own clock (scene time), faster or slower with Speed, so Speed never jumps
+struct WinState { uint32_t last, ct; float rem; };
+float winClock(WinState *st, float rate) {
+  const uint32_t now = strip.now;
+  if (SEGENV.call == 0) { st->last = now; st->ct = 0; st->rem = 0; }
+  uint32_t d = now - st->last; st->last = now;
+  if (d > 200) d = 200;                               // paused: don't catch up
+  const float adv = d * rate + st->rem;
+  st->ct += (uint32_t)adv; st->rem = adv - (uint32_t)adv;
+  return st->ct / 1000.0f;
+}
+// noise from a float clock: through uint32 so it wraps the same way on the ESP32
+inline uint16_t nq(float x) { return (uint16_t)(uint32_t)(x); }
+inline float sstep(float e0, float e1, float x) { x = constrain((x - e0) / (e1 - e0), 0.0f, 1.0f); return x * x * (3.0f - 2.0f * x); }
+inline float fract1(float x) { return x - floorf(x); }
+// inside a triangle pointing up (apex above the base) or down
+inline bool inTri(float u, float v, float cx, float apexY, float baseY, float hw) {
+  const float f = (v - apexY) / (baseY - apexY);
+  return f >= 0.0f && f <= 1.0f && fabsf(u - cx) <= f * hw;
+}
+// the classic heart curve, centered at (cx, cy), size s (half width ~ s), point down
+inline bool inHeart(float u, float v, float cx, float cy, float s) {
+  const float x = (u - cx) / s * 1.12f, y = -(v - cy) / s * 1.12f + 0.12f;
+  const float a = x * x + y * y - 1.0f;
+  return a * a * a - x * x * y * y * y <= 0.0f;
+}
+
+// ---------------------------------------------------------------- tiny fonts
+// 3 x 5 letters for the info line. Each glyph: width, then 5 rows of 3 bits (4 = left column).
+// Lower case shows as upper case; "°" (or *) is the degree sign.
+struct WinGlyph { char ch; uint8_t w, r[5]; };
+const WinGlyph FONT35[] PROGMEM = {
+  {' ',2,{0,0,0,0,0}}, {'0',3,{7,5,5,5,7}}, {'1',3,{2,6,2,2,7}}, {'2',3,{7,1,7,4,7}}, {'3',3,{7,1,3,1,7}},
+  {'4',3,{5,5,7,1,1}}, {'5',3,{7,4,7,1,7}}, {'6',3,{7,4,7,5,7}}, {'7',3,{7,1,1,2,2}}, {'8',3,{7,5,7,5,7}},
+  {'9',3,{7,5,7,1,7}}, {'A',3,{2,5,7,5,5}}, {'B',3,{6,5,6,5,6}}, {'C',3,{3,4,4,4,3}}, {'D',3,{6,5,5,5,6}},
+  {'E',3,{7,4,6,4,7}}, {'F',3,{7,4,6,4,4}}, {'G',3,{3,4,5,5,3}}, {'H',3,{5,5,7,5,5}}, {'I',3,{7,2,2,2,7}},
+  {'J',3,{1,1,1,5,2}}, {'K',3,{5,5,6,5,5}}, {'L',3,{4,4,4,4,7}}, {'M',3,{5,7,7,5,5}}, {'N',3,{6,5,5,5,5}},
+  {'O',3,{2,5,5,5,2}}, {'P',3,{6,5,6,4,4}}, {'Q',3,{2,5,5,6,3}}, {'R',3,{6,5,6,5,5}}, {'S',3,{3,4,2,1,6}},
+  {'T',3,{7,2,2,2,2}}, {'U',3,{5,5,5,5,7}}, {'V',3,{5,5,5,5,2}}, {'W',3,{5,5,7,7,5}}, {'X',3,{5,5,2,5,5}},
+  {'Y',3,{5,5,2,2,2}}, {'Z',3,{7,1,2,4,7}}, {'.',1,{0,0,0,0,2}}, {':',1,{0,2,0,2,0}}, {'-',3,{0,0,7,0,0}},
+  {'/',3,{1,1,2,4,4}}, {'%',3,{5,1,2,4,5}}, {'+',3,{0,2,7,2,0}}, {'!',1,{2,2,2,0,2}}, {'?',3,{7,1,3,0,2}},
+  {',',1,{0,0,0,2,2}}, {'\'',1,{2,2,0,0,0}}, {'\x01',3,{2,5,2,0,0}},   // \x01 = degree sign
+};
+// 4 x 7 digits for the time; each row is 4 bits (8 = left column)
+const uint8_t DIGITS47[10][7] PROGMEM = {
+  {6,9,9,9,9,9,6}, {2,6,2,2,2,2,7}, {6,9,1,2,4,8,15}, {14,1,1,6,1,1,14}, {2,6,10,10,15,2,2},
+  {15,8,14,1,1,9,6}, {6,8,8,14,9,9,6}, {15,1,1,2,4,4,4}, {6,9,9,6,9,9,6}, {6,9,9,7,1,1,6},
+};
+const uint8_t DIGITS35[10][5] PROGMEM = {
+  {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,3,1,7}, {5,5,7,1,1}, {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,2,2}, {7,5,7,5,7}, {7,5,7,1,7},
+};
+
+const WinGlyph *glyphFor(char ch) {
+  if (ch >= 'a' && ch <= 'z') ch -= 32;
+  if (ch == '*') ch = '\x01';
+  for (const WinGlyph &g : FONT35) if (g.ch == ch) return &g;
+  return nullptr;
+}
+// the info text cleaned up for the small font: "°" (UTF-8 C2 B0) becomes the degree glyph,
+// anything the font doesn't have is dropped
+uint8_t infoText(const char *in, char *out, uint8_t cap) {
+  uint8_t n = 0;
+  for (const uint8_t *p = (const uint8_t *)in; p && *p && n + 1 < cap; p++) {
+    char ch = (char)*p;
+    if (*p == 0xC2) continue;
+    if (*p == 0xB0 || *p == 0xBA) ch = '\x01';
+    if (glyphFor(ch)) out[n++] = ch;
+  }
+  out[n] = 0;
+  return n;
+}
+int textWidth(const char *s) {
+  int w = 0;
+  for (; *s; s++) { const WinGlyph *g = glyphFor(*s); if (g) w += g->w + 1; }
+  return w > 0 ? w - 1 : 0;
+}
+// draw text at pixel (x, y), whole pixels only (crisp on the LEDs); clipped to the matrix
+void drawText(Canvas &cv, const char *s, int x, int y, const Rgbw &c) {
+  for (; *s; s++) {
+    const WinGlyph *g = glyphFor(*s);
+    if (!g) continue;
+    for (int r = 0; r < 5; r++) for (int k = 0; k < g->w; k++) {
+      const int bit = g->w == 1 ? 2 : (4 >> k);
+      if (g->r[r] & bit) cvAt(cv, x + k, y + r, c, 1.0f, true);
+    }
+    x += g->w + 1;
+  }
+}
+
+// ---------------------------------------------------------------- the calendar
+// day of week, 0 = Sunday (Sakamoto)
+int dowOf(int y, int m, int d) {
+  static const int t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+  if (m < 3) y -= 1;
+  return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+enum : uint8_t { HW_AUTO, HW_HALLOWEEN, HW_THANKS, HW_XMAS, HW_FIREWORKS, HW_VALENTINE, HW_PADDY, HW_COASTAL };
+// which holiday the date belongs to (Coastal the rest of the year, or before the clock is set)
+uint8_t holidayFor(time_t t) {
+  if (t < 1600000000) return HW_COASTAL;
+  const int m = month(t), d = day(t), y = year(t);
+  const int thanks = 1 + (4 - dowOf(y, 11, 1) + 7) % 7 + 21;   // fourth Thursday of November
+  if (m == 10) return HW_HALLOWEEN;
+  if (m == 11) return d <= thanks ? HW_THANKS : HW_XMAS;
+  if (m == 12) return d == 31 ? HW_FIREWORKS : HW_XMAS;
+  if (m == 1 && d == 1) return HW_FIREWORKS;
+  if (m == 2 && d <= 14) return HW_VALENTINE;
+  if (m == 3 && d <= 17) return HW_PADDY;
+  if (m == 7 && d <= 5) return HW_FIREWORKS;
+  return HW_COASTAL;
+}
+
+// ================================================================ Window Clock (241)
+// The time in big 4 x 7 digits, with an info line under it in small letters and an animated band
+// along the bottom. The info line is the segment's name: Home Assistant writes the weather and the
+// pool temperature there (e.g. "78° POOL 84°"); longer text scrolls. With no name it shows the
+// weekday and date. The time comes from WLED's clock (Config > Time & Macros: NTP and time zone).
+//   Speed       - how fast the background moves (and the info line scrolls)
+//   Glow        - how bright the background is (0 = black)
+//   Look        - background, in quarters: Coastal waves, Starry night, Holiday colors (by date), Plain
+//   My colors   - time, info and background accent from color slots 1-3
+//   24 hour     - 24 h time (otherwise 12 h without AM/PM)
+//   Blink colon - the colon blinks every second
+void mode_window_clock() {
+  const int wd = SEG_W, ht = SEG_H;
+  if (!SEGMENT.is2D() || wd * ht > WIN_MAX_PX || !SEGENV.allocateData(sizeof(WinState) + wd * ht * sizeof(Rgbw))) { staticFallback(); return; }
+  WinState *st = reinterpret_cast<WinState *>(SEGENV.data);
+  Canvas cv; cvInit(cv, SEGENV.data + sizeof(WinState));
+  const float t = winClock(st, 0.25f + SEGMENT.speed / 170.0f);
+  const float glow = SEGMENT.intensity / 255.0f;
+  const uint8_t look = SEGMENT.custom1 >> 6;
+  const bool mine = SEGMENT.check1;
+  const Rgbw timeTop = mine && SEGCOLOR(0) ? unpackC(SEGCOLOR(0)) : Rgbw{ 255, 150, 0, 60 };
+  const Rgbw timeBot = mine && SEGCOLOR(0) ? scaleC(unpackC(SEGCOLOR(0)), 0.8f) : Rgbw{ 255, 70, 0, 0 };
+  const Rgbw infoC = mine && SEGCOLOR(1) ? unpackC(SEGCOLOR(1)) : Rgbw{ 0, 170, 230, 0 };
+
+  // ---- layout: time on top, info under it, the background band along the bottom
+  const time_t now = localTime;
+  int hh = hour(now), mm = minute(now);
+  if (!SEGMENT.check2) { hh %= 12; if (hh == 0) hh = 12; }
+  char digits[4]; uint8_t nd = 0;
+  if (hh >= 10 || SEGMENT.check2) digits[nd++] = hh / 10;
+  digits[nd++] = hh % 10; digits[nd++] = mm / 10; digits[nd++] = mm % 10;
+  // pick the biggest font that fits: 4 x 7 with a space each side of the colon, then without,
+  // then 3 x 5 the same way
+  bool big = true; int cgap = 1, tw = 0;
+  for (int pass = 0; pass < 4; pass++) {
+    big = pass < 2; cgap = (pass & 1) ? 0 : 1;
+    tw = nd * (big ? 4 : 3) + nd - 2 + 2 * cgap + 1;          // digits 1 px apart, the colon with cgap each side
+    if (tw <= wd) break;
+  }
+  const int th = big ? 7 : 5;
+  const int yTime = max(0, ht * 2 / 24);
+  const int yInfo = yTime + th + max(2, ht * 3 / 24);
+  const bool showInfo = yInfo + 5 <= ht;
+  const int yBand = showInfo ? yInfo + 5 + max(1, ht * 2 / 24) : yTime + th + 2;
+
+  // ---- background
+  const uint8_t hol = holidayFor(now);
+  Rgbw hc[3];
+  switch (hol) {
+    case HW_HALLOWEEN: hc[0] = { 255, 60, 0, 0 };   hc[1] = { 90, 0, 140, 0 };  hc[2] = { 60, 200, 0, 0 }; break;
+    case HW_THANKS:    hc[0] = { 255, 14, 0, 0 };   hc[1] = { 255, 100, 0, 10 }; hc[2] = { 160, 0, 10, 0 }; break;
+    case HW_XMAS:      hc[0] = { 255, 0, 0, 0 };    hc[1] = { 0, 160, 20, 0 };  hc[2] = { 0, 0, 0, 160 }; break;
+    case HW_FIREWORKS: hc[0] = { 255, 0, 0, 0 };    hc[1] = { 0, 0, 0, 170 };   hc[2] = { 0, 30, 255, 0 }; break;
+    case HW_VALENTINE: hc[0] = { 255, 0, 40, 0 };   hc[1] = { 255, 40, 120, 30 }; hc[2] = { 0, 0, 0, 120 }; break;
+    case HW_PADDY:     hc[0] = { 0, 200, 30, 0 };   hc[1] = { 255, 140, 0, 20 }; hc[2] = { 120, 255, 40, 0 }; break;
+    default:           hc[0] = { 0, 90, 110, 0 };   hc[1] = { 0, 25, 80, 0 };   hc[2] = { 0, 0, 0, 90 }; break;
+  }
+  if (mine && SEGCOLOR(2)) hc[0] = hc[1] = unpackC(SEGCOLOR(2));
+  const float bandH = max(1, ht - yBand);
+  for (int y = 0; y < ht; y++) for (int x = 0; x < wd; x++) {
+    Rgbw c = { 0, 0, 0, 0 };
+    const bool inBand = y >= yBand;
+    if (look == 0) {                                     // coastal: a night sky, the sea rolling in along the bottom
+      c = { 0, 2.0f + 3.0f * y / ht, 8.0f + 14.0f * y / ht, 0 };
+      if (inBand) {
+        const float d = (y - yBand + 0.5f) / bandH;      // 0 = the top of the sea
+        const float n = perlin8(nq(x * 34.0f + t * 22.0f), nq(y * 52.0f - t * 30.0f), nq(t * 9.0f)) / 255.0f;
+        c = mixC(Rgbw{ 0, 40, 110, 0 }, Rgbw{ 0, 130, 150, 0 }, constrain(n * 1.4f - 0.2f - d * 0.3f, 0.0f, 1.0f));
+        const float crest = sstep(0.62f, 0.8f, n) * (1.0f - d * 0.5f);
+        c.w += 150.0f * crest; c.b += 40.0f * crest;
+        c = scaleC(c, 0.25f + 0.75f * (1.0f - d * 0.45f));
+      }
+    } else if (look == 1) {                              // starry night
+      c = { 0, 0, 6.0f + 6.0f * y / ht, 0 };
+      const bool nearText = (y >= yTime - 1 && y <= yTime + th) || (showInfo && y >= yInfo - 1 && y <= yInfo + 5);
+      if (!nearText && h01(x, y, 777) < 0.09f) {
+        const float tw2 = 0.5f + 0.5f * sinf(t * (1.3f + h01(x, y, 778) * 2.0f) + h01(x, y, 779) * 6.28f);
+        c.w += 40.0f + 120.0f * tw2 * tw2; c.b += 30.0f * tw2;
+      }
+    } else if (look == 2 && inBand) {                    // holiday colors: stripes drifting along the band
+      const float s = fract1((x + (y - yBand) * 0.8f) / 6.0f - t * 0.25f) * 3.0f;
+      const int i = (int)s; const float f = sstep(0.75f, 1.0f, s - i);
+      c = mixC(hc[i % 3], hc[(i + 1) % 3], f);
+      c = scaleC(c, 0.55f + 0.45f * perlin8(nq(x * 40.0f), nq(t * 40.0f)) / 255.0f);
+    }
+    cv.fb[x + y * wd] = scaleC(c, glow);
+  }
+
+  // ---- the time
+  const bool colon = !SEGMENT.check3 || (strip.now % 1000) < 500;
+  int x = (wd - tw + 1) / 2;
+  for (int i = 0; i < nd; i++) {
+    if (i == nd - 2) {                                  // the colon before the minutes
+      const int cx = x - 1 + cgap;
+      if (colon) for (int r = 0; r < th; r++) {
+        const bool on = big ? (r == 2 || r == 4) : (r == 1 || r == 3);
+        if (on) cvAt(cv, cx, yTime + r, mixC(timeTop, timeBot, (float)r / (th - 1)), 1.0f, true);
+      }
+      x = cx + 1 + cgap + 1;
+    }
+    const uint8_t dgt = digits[i];
+    const int gw = big ? 4 : 3;
+    for (int r = 0; r < th; r++) {
+      const uint8_t bits = big ? DIGITS47[dgt][r] : DIGITS35[dgt][r];
+      for (int k = 0; k < gw; k++) if (bits & ((big ? 8 : 4) >> k)) cvAt(cv, x + k, yTime + r, mixC(timeTop, timeBot, (float)r / (th - 1)), 1.0f, true);
+    }
+    x += gw + 1;
+  }
+
+  // ---- the info line: the segment's name, or the weekday and date
+  if (showInfo) {
+    char txt[WLED_MAX_SEGNAME_LEN + 1];
+    if (SEGMENT.name && SEGMENT.name[0]) infoText(SEGMENT.name, txt, sizeof(txt));
+    else txt[0] = 0;
+    if (!txt[0]) {
+      static const char *const WD[] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+      if (now > 1600000000) snprintf(txt, sizeof(txt), "%s %d", WD[(weekday(now) + 6) % 7], day(now));
+    }
+    const int iw = textWidth(txt);
+    if (iw <= wd) drawText(cv, txt, (wd - iw + 1) / 2, yInfo, infoC);
+    else {                                               // too long: scroll it right to left, with a gap between repeats
+      const int loop = iw + 8;
+      const int off = (int)(t * 7.0f) % loop;
+      drawText(cv, txt, wd - off, yInfo, infoC);
+      drawText(cv, txt, wd - off + loop, yInfo, infoC);
+    }
+  }
+  cvFlush(cv);
+}
+const char _data_window_clock[] PROGMEM =
+  "Window Clock@Speed,Glow,Look,,,My colors,24 hour,Blink colon;Time,Info,Accent;;2;sx=128,ix=160,c1=0,o1=0,o2=0,o3=0";
+
+// ================================================================ Holiday Window (242)
+// Animated scenes for the window, picked with the Scene slider (in eighths):
+//   0-31    Auto          - by the date: Halloween all October, Thanksgiving through Thanksgiving
+//                           Day, Christmas until the 30th, Fireworks on New Year's Eve and Day and
+//                           July 1-5, Valentine's Feb 1-14, St. Patrick's Mar 1-17, else Coastal
+//   32-63   Halloween     - a jack-o'-lantern flickering by candlelight, bats crossing the moon
+//   64-95   Thanksgiving  - a turkey fanning its tail, leaves blowing past
+//   96-127  Christmas     - a tree with twinkling bulbs and a shining star, snow falling
+//   128-159 Fireworks     - rockets and bursts: peonies, rings, gold willows, crackle
+//   160-191 Valentine's   - a beating heart, little hearts floating up
+//   192-223 St. Patrick's - a shamrock with a shimmer, gold glints falling
+//   224-255 Coastal       - a sunset over the water with a palm, the sun going down and coming back
+//   Speed (1x at 128), Sparkle (snow, stars, twinkles, bats, leaves, how busy the fireworks are)
+struct HolCtx { float t, den, flick, bob, sway, beat, sunY; };
+
+// one scene's picture at (u, v) on the 24 x 24 design grid
+Rgbw holidayPx(uint8_t sc, float u, float v, const HolCtx &k) {
+  switch (sc) {
+    case HW_HALLOWEEN: {
+      Rgbw c = mixC(Rgbw{ 8, 0, 26, 0 }, Rgbw{ 46, 2, 64, 0 }, sstep(0.0f, 21.0f, v));
+      const float md = sqrtf((u - 18.6f) * (u - 18.6f) + (v - 4.6f) * (v - 4.6f));
+      if (md < 3.3f) {
+        const float cr = perlin8(nq(u * 90.0f), nq(v * 90.0f)) / 255.0f;
+        c = mixC(Rgbw{ 255, 200, 90, 70 }, Rgbw{ 190, 140, 50, 30 }, sstep(0.5f, 0.8f, cr));
+      } else {                                         // moonlight around it
+        const float g = expf(-(md - 3.3f) * 1.1f);
+        c.r += 70.0f * g; c.g += 45.0f * g; c.b += 20.0f * g;
+      }
+      const float ground = 21.4f + 0.6f * sinf(u * 0.45f + 1.0f);
+      if (v > ground) c = { 6, 12, 2, 0 };
+      // the pumpkin
+      const float pu = (u - 12.0f) / 8.7f, pv = (v - 15.7f) / 6.6f, e = pu * pu + pv * pv;
+      if (e < 1.0f) {
+        const float rib = 0.6f + 0.4f * fabsf(sinf(asinf(constrain(pu / sqrtf(max(0.05f, 1.0f - pv * pv)), -1.0f, 1.0f)) * 2.6f + 1.57f));
+        c = scaleC(Rgbw{ 255, 52, 0, 0 }, rib * (0.8f - 0.4f * e * e) * (0.85f + 0.15f * k.flick));
+        const Rgbw fire = scaleC(Rgbw{ 255, 190, 40, 150 }, k.flick);
+        bool face = inTri(u, v, 8.5f, 11.7f, 14.6f, 1.9f) || inTri(u, v, 15.5f, 11.7f, 14.6f, 1.9f) || inTri(u, v, 12.0f, 14.6f, 16.3f, 1.0f);
+        const float m = (u - 12.0f) / 6.2f;
+        if (fabsf(m) < 1.0f) {
+          const float top = 17.0f + 0.9f * (1.0f - m * m), bot = 17.4f + 2.5f * sqrtf(1.0f - m * m);
+          if (v > top && v < bot && !(u > 9.4f && u < 10.8f && v < top + 0.9f) && !(u > 13.2f && u < 14.6f && v > bot - 0.9f)) face = true;
+        }
+        if (face) c = fire;
+      }
+      if (u > 11.2f && u < 12.9f && v > 7.6f && v < 9.6f - (u - 11.2f) * 0.2f) c = { 70, 110, 0, 0 };   // stem
+      // candle light on the ground in front
+      if (v > ground) { const float g = expf(-((u - 12.0f) * (u - 12.0f)) / 30.0f); c.r += 60.0f * g * k.flick; c.g += 18.0f * g * k.flick; }
+      return c;
+    }
+    case HW_THANKS: {
+      Rgbw c = mixC(Rgbw{ 3, 2, 16, 0 }, Rgbw{ 34, 8, 4, 0 }, sstep(2.0f, 21.0f, v));           // dusk
+      if (v > 21.6f) c = (h01((int)(u * 2.0f), (int)(v * 2.0f), 5) < 0.25f) ? Rgbw{ 120, 70, 0, 10 } : Rgbw{ 45, 18, 0, 0 };   // hay
+      // tail fan: rings of red, orange and gold feathers with rounded tips, swaying a little
+      const float fx = u - 12.0f, fy = v - 15.6f, r = sqrtf(fx * fx + fy * fy);
+      const float th = atan2f(fx, -fy) + 0.06f * sinf(k.t * 1.3f);    // 0 = straight up
+      const float R = 11.3f * (0.965f + 0.035f * sinf(k.t * 0.9f)) * (0.9f + 0.1f * fabsf(cosf(th * 4.5f)));
+      if (r < R && fabsf(th) < 1.9f) {
+        const float q = r / R;
+        c = q > 0.80f ? Rgbw{ 220, 6, 0, 0 } : q > 0.62f ? Rgbw{ 255, 75, 0, 0 } : Rgbw{ 255, 160, 0, 40 };
+        if (fabsf(fract1(th * 4.5f / 3.1416f + 0.5f) - 0.5f) < 0.07f && q > 0.5f) c = scaleC(c, 0.35f);   // between feathers
+      }
+      // body, with a darker wing
+      const float bd = (u - 12.0f) * (u - 12.0f) / 25.0f + (v - 16.2f) * (v - 16.2f) / 26.0f;
+      if (bd < 1.0f) {
+        c = scaleC(Rgbw{ 150, 58, 8, 0 }, 1.0f - 0.35f * bd);
+        const float wx = (u - 12.0f) / 3.2f, wy = (v - 17.6f) / 2.6f;
+        if (wx * wx + wy * wy < 1.0f && fabsf(u - 12.0f) > 0.6f) c = { 95, 34, 4, 0 };
+      }
+      // head with a dark outline, white eyes, beak and the red wattle
+      const float hy = 10.4f + k.bob;
+      const float hd = (u - 12.0f) * (u - 12.0f) + (v - hy) * (v - hy);
+      if (hd < 9.0f && v < hy + 2.4f) c = { 25, 8, 0, 0 };
+      if (hd < 5.3f) c = { 110, 52, 14, 0 };
+      if (fabsf(fabsf(u - 12.0f) - 1.5f) < 0.5f && fabsf(v - hy + 0.9f) < 0.5f) c = { 0, 0, 0, 255 };   // eyes
+      if (fabsf(u - 12.0f) < 1.0f && v > hy + 0.1f && v < hy + 1.2f) c = { 255, 190, 0, 40 };      // beak
+      if (u > 12.0f && u < 13.0f && v > hy + 1.2f && v < hy + 3.3f) c = { 255, 0, 0, 0 };            // wattle
+      // feet
+      if (v > 20.8f && v < 22.0f && (fabsf(u - 10.8f) < 0.45f || fabsf(u - 13.2f) < 0.45f)) c = { 255, 110, 0, 0 };
+      return c;
+    }
+    case HW_XMAS: {
+      Rgbw c = mixC(Rgbw{ 0, 2, 18, 0 }, Rgbw{ 0, 10, 44, 0 }, sstep(0.0f, 21.0f, v));
+      const float ground = 21.5f + 0.5f * sinf(u * 0.5f);
+      if (v > ground) c = { 10, 16, 32, 28 };
+      // three tiers
+      const float tiers[3][3] = { { 4.0f, 10.4f, 4.4f }, { 7.4f, 15.0f, 6.6f }, { 10.8f, 19.8f, 8.8f } };
+      for (const auto &tr : tiers) {
+        if (inTri(u, v, 12.0f, tr[0], tr[1], tr[2])) {
+          const float f = (v - tr[0]) / (tr[1] - tr[0]);
+          c = mixC(Rgbw{ 0, 150, 30, 0 }, Rgbw{ 0, 70, 14, 0 }, constrain(f * 0.8f + fabsf(u - 12.0f) / (tr[2] + 0.1f) * 0.3f, 0.0f, 1.0f));
+        }
+      }
+      if (u > 10.9f && u < 13.1f && v > 19.8f && v < 21.9f) c = { 90, 40, 6, 0 };            // trunk
+      // presents
+      if (v > 19.9f && v < 22.2f && u > 4.4f && u < 7.6f) c = (fabsf(u - 6.0f) < 0.4f || fabsf(v - 21.0f) < 0.35f) ? Rgbw{ 255, 160, 0, 40 } : Rgbw{ 180, 0, 10, 0 };
+      if (v > 20.6f && v < 22.2f && u > 16.6f && u < 19.4f) c = (fabsf(u - 18.0f) < 0.4f) ? Rgbw{ 0, 0, 0, 160 } : Rgbw{ 0, 40, 200, 0 };
+      return c;
+    }
+    case HW_FIREWORKS: {
+      Rgbw c = mixC(Rgbw{ 0, 0, 4, 0 }, Rgbw{ 2, 4, 22, 0 }, sstep(4.0f, 23.0f, v));
+      // a low skyline (palms and rooftops) along the bottom
+      const float sky = 22.0f - 1.2f * (sinf(u * 0.9f) > 0.6f) - 0.8f * (fmodf(u, 7.0f) < 3.0f);
+      if (v > sky) c = { 1, 1, 3, 0 };
+      return c;
+    }
+    case HW_VALENTINE: {
+      Rgbw c = mixC(Rgbw{ 18, 0, 8, 0 }, Rgbw{ 40, 0, 18, 0 }, sstep(0.0f, 24.0f, v));
+      for (int i = 0; i < 6; i++) {                     // little hearts floating up
+        const float sp = 1.4f + h01(i, 3, 41) * 1.4f;
+        const float y = 26.0f - fmodf(k.t * sp + h01(i, 4, 41) * 30.0f, 30.0f);
+        const float x = 2.0f + h01(i, 5, 41) * 20.0f + sinf(k.t * 1.1f + i) * 1.2f;
+        if (inHeart(u, v, x, y, 1.5f)) c = (i % 3 == 0) ? Rgbw{ 0, 0, 0, 150 } : (i % 3 == 1 ? Rgbw{ 255, 40, 110, 20 } : Rgbw{ 200, 0, 30, 0 });
+      }
+      const float s = 7.8f * k.beat;
+      if (inHeart(u, v, 12.0f, 12.4f, s)) {
+        const float hx = (u - 12.0f) / s, hy = (v - 12.4f) / s;
+        c = mixC(Rgbw{ 255, 0, 30, 0 }, Rgbw{ 255, 70, 130, 60 }, constrain(0.9f - hy * 0.9f - hx * 0.5f - 0.6f, 0.0f, 1.0f) * 0.9f);
+        c = scaleC(c, 0.75f + 0.25f * k.beat / 1.08f);
+      }
+      return c;
+    }
+    case HW_PADDY: {
+      Rgbw c = mixC(Rgbw{ 0, 8, 4, 0 }, Rgbw{ 0, 22, 8, 0 }, sstep(0.0f, 24.0f, v));
+      const float cx = 12.0f, cy = 10.8f;
+      // stem: a gentle curve down to the right
+      const float sv = (v - cy) / 10.0f;
+      if (sv > 0.0f && sv < 1.0f && fabsf(u - (cx + 2.2f * sv * sv)) < 0.75f) c = { 0, 140, 25, 0 };
+      // three heart-shaped leaves pointing out from the middle
+      for (int i = 0; i < 3; i++) {
+        const float a = -1.5708f + i * 2.0944f;        // up, lower right, lower left
+        const float ca = cosf(a), sa = sinf(a);
+        const float ru = u - cx, rv = v - cy;
+        // rotate so this leaf points up, then test a heart (point toward the middle)
+        const float lu = ru * (-sa) + rv * ca, lv = -(ru * ca + rv * sa);
+        if (inHeart(lu, lv, 0.0f, -4.5f, 3.9f)) {
+          const float sh = 0.5f + 0.5f * sinf((u + v) * 0.5f - k.t * 2.2f);
+          c = mixC(Rgbw{ 0, 170, 30, 0 }, Rgbw{ 60, 255, 80, 20 }, sh * sh * 0.7f);
+          if (fabsf(lu) < 0.35f && lv < -0.8f) c = scaleC(c, 0.6f);   // the vein
+        }
+      }
+      return c;
+    }
+    default: {                                          // Coastal sunset
+      const float hz = 16.5f;
+      const float hi = constrain((hz - k.sunY) / 10.0f, 0.0f, 1.0f);     // 1 = sun high, 0 = set
+      const Rgbw top = mixC(Rgbw{ 4, 0, 18, 0 }, Rgbw{ 8, 24, 80, 0 }, hi);
+      const Rgbw low = mixC(Rgbw{ 150, 8, 36, 0 }, Rgbw{ 255, 90, 8, 10 }, hi);
+      Rgbw c;
+      if (v < hz) {
+        c = mixC(top, low, powf(constrain(v / hz, 0.0f, 1.0f), 1.6f));
+        const float sd = sqrtf((u - 14.5f) * (u - 14.5f) + (v - k.sunY) * (v - k.sunY));
+        if (sd < 2.8f) c = mixC(Rgbw{ 255, 210, 80, 140 }, Rgbw{ 255, 110, 0, 10 }, sd / 2.8f);
+        else { const float g = expf(-(sd - 2.8f) * 1.1f) * (0.4f + 0.6f * hi); c.r += 70.0f * g; c.g += 28.0f * g; }
+      } else {                                           // the water: waves, and the sun's glitter on them
+        const float d = (v - hz) / (24.0f - hz);
+        c = mixC(Rgbw{ 0, 26, 60, 0 }, Rgbw{ 0, 8, 30, 0 }, d);
+        c = mixC(c, scaleC(low, 0.35f), (1.0f - d) * 0.5f);
+        const float n = perlin8(nq(u * 40.0f + k.t * 6.0f), nq(v * 110.0f - k.t * 34.0f)) / 255.0f;
+        const float lane = expf(-((u - 14.5f) * (u - 14.5f)) / (2.0f + d * 14.0f));
+        const float sunOn = constrain((hz + 2.5f - k.sunY) / 3.0f, 0.0f, 1.0f);
+        const float glit = sstep(0.55f, 0.8f, n) * lane * sunOn;
+        c.r += 255.0f * glit; c.g += 140.0f * glit; c.b += 30.0f * glit; c.w += 90.0f * glit;
+        c.w += 30.0f * sstep(0.7f, 0.85f, n) * (1.0f - d);
+      }
+      // the beach and the palm (silhouettes)
+      if (v > 21.0f - 2.5f * expf(-(u * u) / 30.0f) && u < 9.0f + (v - 21.0f) * 3.0f) c = { 0, 0, 0, 0 };
+      const float tv = (v - 9.6f) / 12.0f;               // trunk from the crown (0) to the sand (1)
+      if (tv > 0.0f && tv < 1.0f) {
+        const float tx = 5.6f - 2.3f * tv * tv + k.sway * (1.0f - tv) * 0.6f;
+        if (fabsf(u - tx) < 0.55f + 0.35f * tv) c = { 0, 0, 0, 0 };
+      }
+      return c;
+    }
+  }
+}
+
+void mode_holiday_window() {
+  const int wd = SEG_W, ht = SEG_H;
+  if (!SEGMENT.is2D() || wd * ht > WIN_MAX_PX || !SEGENV.allocateData(sizeof(WinState) + wd * ht * sizeof(Rgbw))) { staticFallback(); return; }
+  WinState *st = reinterpret_cast<WinState *>(SEGENV.data);
+  Canvas cv; cvInit(cv, SEGENV.data + sizeof(WinState));
+  const float t = winClock(st, 0.25f + SEGMENT.speed / 170.0f);
+  uint8_t sc = SEGMENT.custom1 >> 5;
+  if (sc == HW_AUTO) sc = holidayFor(localTime);
+  HolCtx k;
+  k.t = t; k.den = SEGMENT.intensity / 255.0f;
+  k.flick = 0.72f + 0.28f * perlin8(nq(t * 260.0f), 99) / 255.0f;
+  k.bob = 0.35f * sinf(t * 2.4f) + (fmodf(t, 7.0f) > 6.2f ? 0.8f * sinf((fmodf(t, 7.0f) - 6.2f) * 3.93f) : 0.0f);   // a peck now and then
+  k.sway = sinf(t * 0.8f);
+  { const float ph = fract1(t / 1.1f); k.beat = 1.0f + 0.07f * expf(-ph * ph / 0.004f) + 0.045f * expf(-(ph - 0.24f) * (ph - 0.24f) / 0.004f); }
+  k.sunY = 11.0f + 8.0f * (0.5f - 0.5f * cosf(t * 6.2832f / 90.0f));   // sets over 45 s, rises over 45 s
+  cvPaint(cv, [&](float u, float v) { return holidayPx(sc, u, v, k); });
+
+  const float den = k.den;
+  auto hashPx = [&](int x, int y, uint32_t s) { return h01(x + y * 131, s, 4242); };
+  switch (sc) {
+    case HW_HALLOWEEN: {
+      for (int y = 0; y < cv.ht; y++) for (int x = 0; x < cv.wd; x++) {          // stars
+        const float u = cv.du(x), v = cv.dv(y);
+        if (v > 9.5f || (u - 18.6f) * (u - 18.6f) + (v - 4.6f) * (v - 4.6f) < 20.0f) continue;
+        if (hashPx(x, y, 1) < 0.05f * den + 0.01f) {
+          const float tw = 0.5f + 0.5f * sinf(t * (1.5f + hashPx(x, y, 2) * 2.0f) + hashPx(x, y, 3) * 6.28f);
+          cvAt(cv, x, y, Rgbw{ 30, 20, 60, 140 }, tw * tw, false);
+        }
+      }
+      const int bats = 1 + (int)(den * 3.0f);
+      for (int i = 0; i < bats; i++) {                 // bats: silhouettes flapping across
+        const float sp = 2.2f + h01(i, 1, 66) * 1.6f;
+        const float x = fmodf(t * sp + h01(i, 2, 66) * 34.0f, 34.0f) - 5.0f;
+        const float y = 2.5f + h01(i, 3, 66) * 5.5f + sinf(t * 1.3f + i * 2.0f) * 1.4f;
+        const float fl = sinf(t * 13.0f + i * 1.7f);
+        const Rgbw bat = { 0, 0, 0, 0 };
+        cvDot(cv, x, y, bat, 1.0f, true);
+        cvLine(cv, x, y, x - 2.3f, y - 1.3f * fl, bat, 0.9f);
+        cvLine(cv, x, y, x + 2.3f, y - 1.3f * fl, bat, 0.9f);
+      }
+      break;
+    }
+    case HW_THANKS: {
+      const int n = 2 + (int)(den * 6.0f);
+      for (int i = 0; i < n; i++) {                    // leaves blowing past
+        const float sp = 2.0f + h01(i, 1, 55) * 2.5f;
+        const float x = fmodf(t * sp + h01(i, 2, 55) * 32.0f, 32.0f) - 4.0f;
+        const float y = fmodf(t * (0.7f + h01(i, 3, 55)) + h01(i, 4, 55) * 26.0f, 26.0f) - 1.0f + sinf(t * 2.0f + i) * 0.8f;
+        const Rgbw lc = unpackC(FALL[i % 6]);
+        const float flip = 0.55f + 0.45f * sinf(t * 5.0f + i * 1.3f);
+        cvDot(cv, x, y, scaleC(lc, flip), 1.0f, true);
+      }
+      break;
+    }
+    case HW_XMAS: {
+      static const Rgbw BULBS[5] = { { 255, 0, 0, 0 }, { 255, 140, 0, 40 }, { 0, 40, 255, 0 }, { 0, 0, 0, 255 }, { 255, 0, 90, 0 } };
+      const float tiers[3][3] = { { 4.0f, 10.4f, 4.4f }, { 7.4f, 15.0f, 6.6f }, { 10.8f, 19.8f, 8.8f } };
+      for (int y = 0; y < cv.ht; y++) for (int x = 0; x < cv.wd; x++) {          // twinkling bulbs on the tree
+        const float u = cv.du(x), v = cv.dv(y);
+        bool on = false;
+        for (const auto &tr : tiers) on |= inTri(u, v, 12.0f, tr[0] + 1.2f, tr[1] - 0.4f, tr[2] - 1.0f);
+        if (!on || hashPx(x, y, 7) > 0.2f + 0.12f * den) continue;
+        const float tw = 0.45f + 0.55f * (0.5f + 0.5f * sinf(t * (0.8f + 2.5f * den * hashPx(x, y, 8)) + hashPx(x, y, 9) * 6.28f));
+        cv.fb[x + y * cv.wd] = scaleC(BULBS[(int)(hashPx(x, y, 10) * 5)], tw);
+      }
+      const float sh = 0.7f + 0.3f * sinf(t * 3.0f);    // the star on top
+      cvGlow(cv, 12.0f, 3.4f, Rgbw{ 255, 170, 30, 160 }, 0.9f * sh, 0.8f);
+      cvLine(cv, 12.0f, 1.6f, 12.0f, 5.0f, Rgbw{ 255, 200, 60, 220 }, sh);
+      cvLine(cv, 10.4f, 3.4f, 13.6f, 3.4f, Rgbw{ 255, 200, 60, 220 }, sh);
+      const int flakes = 6 + (int)(den * 26.0f);
+      for (int i = 0; i < flakes; i++) {               // snow
+        const float sp = 1.2f + h01(i, 1, 33) * 1.6f;
+        const float y = fmodf(t * sp + h01(i, 2, 33) * 27.0f, 27.0f) - 1.5f;
+        const float x = h01(i, 3, 33) * 25.0f - 0.5f + sinf(t * 0.9f + i * 1.9f) * 0.8f;
+        cvDot(cv, x, y, Rgbw{ 40, 50, 70, 200 }, 0.85f, false);
+      }
+      break;
+    }
+    case HW_FIREWORKS: {
+      static const Rgbw FW[7] = { { 255, 0, 0, 0 }, { 0, 0, 0, 255 }, { 0, 30, 255, 0 }, { 255, 110, 0, 50 }, { 0, 220, 30, 0 }, { 160, 0, 255, 0 }, { 255, 0, 90, 0 } };
+      const int lanes = 2 + (int)(den * 2.0f);
+      for (int j = 0; j < lanes; j++) {
+        const float P = 2.9f + j * 0.85f, tt = t + j * 1.37f;
+        const uint32_t cyc = (uint32_t)(tt / P);
+        const float p = tt - cyc * P;
+        const float lx = 4.0f + h01(cyc, j, 91) * 16.0f, peak = 4.5f + h01(cyc, j, 92) * 5.5f;
+        const uint8_t style = (uint8_t)(h01(cyc, j, 93) * 4);
+        const Rgbw col = style == 2 ? Rgbw{ 255, 120, 10, 60 } : FW[(int)(h01(cyc, j, 94) * 7)];
+        const float rise = 0.85f;
+        if (p < rise) {                                // the rocket going up, with a short trail
+          const float q = p / rise, e = 1.0f - (1.0f - q) * (1.0f - q);
+          const float y = 23.0f - (23.0f - peak) * e, x = lx + (q - 0.5f) * 0.6f;
+          cvGlow(cv, x, y, Rgbw{ 255, 150, 60, 80 }, 0.9f, 0.5f);
+          for (int s = 1; s <= 3; s++) cvDot(cv, x, y + s * 0.9f, Rgbw{ 160, 60, 10, 10 }, 0.7f / s);
+          continue;
+        }
+        const float dur = style == 2 ? 2.0f : 1.6f;
+        const float q = (p - rise) / dur;
+        if (q >= 1.0f) continue;
+        if (q < 0.07f) cvGlow(cv, lx, peak, Rgbw{ 255, 230, 190, 255 }, 1.0f - q / 0.07f, 1.6f);   // the flash
+        const int np = style == 1 ? 16 : 14;
+        const float rmax = style == 1 ? 6.5f : (style == 2 ? 6.0f : 7.0f);
+        const float grav = style == 2 ? 6.0f : 2.4f;
+        const float rot = h01(cyc, j, 95) * 6.28f;
+        for (int i = 0; i < np; i++) {
+          const float a = rot + i * 6.2832f / np;
+          const float sp = (style == 0 ? 0.75f + 0.25f * h01(cyc * 31 + i, j, 96) : 1.0f);
+          for (int tr = 0; tr < 3; tr++) {               // the spark and two trail points behind it
+            const float qq = max(0.0f, q - tr * 0.035f);
+            const float rr = rmax * sp * (1.0f - powf(1.0f - qq, 2.4f));
+            const float x = lx + cosf(a) * rr, y = peak + sinf(a) * rr * 0.92f + grav * qq * qq;
+            float f = powf(1.0f - q, style == 2 ? 1.1f : 1.7f) * (tr == 0 ? 1.0f : 0.35f / tr);
+            if (style == 3 && q > 0.45f) f *= h01(i, (uint32_t)(t * 20.0f), cyc) > 0.5f ? 1.6f : 0.0f;   // crackle
+            const Rgbw cc = (style == 3 && q > 0.45f) ? Rgbw{ 60, 50, 40, 255 } : col;
+            cvDot(cv, x, y, cc, f, false);
+          }
+        }
+      }
+      break;
+    }
+    case HW_VALENTINE:
+    case HW_PADDY: {
+      const bool gold = sc == HW_PADDY;
+      for (int y = 0; y < cv.ht; y++) for (int x = 0; x < cv.wd; x++) {          // sparkles
+        const uint32_t slot = (uint32_t)(t * 3.0f + hashPx(x, y, 21) * 50.0f);
+        if (h01(x + y * 131, slot, 22) < 0.010f + 0.025f * den) {
+          const float f = 1.0f - fract1(t * 3.0f + hashPx(x, y, 21) * 50.0f);
+          cvAt(cv, x, y, gold ? Rgbw{ 255, 140, 0, 60 } : Rgbw{ 0, 0, 0, 200 }, f, false);
+        }
+      }
+      if (gold) {
+        const int n = 3 + (int)(den * 8.0f);
+        for (int i = 0; i < n; i++) {                  // gold glints falling
+          const float y = fmodf(t * (1.6f + h01(i, 1, 12)) + h01(i, 2, 12) * 27.0f, 27.0f) - 1.5f;
+          const float x = h01(i, 3, 12) * 24.0f;
+          cvDot(cv, x, y, Rgbw{ 255, 150, 0, 40 }, 0.6f + 0.4f * sinf(t * 7.0f + i), false);
+        }
+      }
+      break;
+    }
+    case HW_COASTAL:
+    default: {
+      const float hi = constrain((16.5f - k.sunY) / 10.0f, 0.0f, 1.0f);
+      if (hi < 0.5f) for (int y = 0; y < cv.ht; y++) for (int x = 0; x < cv.wd; x++) {   // stars come out after sunset
+        const float v = cv.dv(y);
+        if (v > 9.0f || hashPx(x, y, 31) > 0.05f * den + 0.01f) continue;
+        cvAt(cv, x, y, Rgbw{ 0, 0, 20, 110 }, (0.5f - hi) * 2.0f * (0.5f + 0.5f * sinf(t * 2.0f + hashPx(x, y, 32) * 6.28f)), false);
+      }
+      const Rgbw dark = { 0, 0, 0, 0 };
+      const float cx = 5.6f + k.sway * 0.6f, cy = 9.6f;   // palm fronds swaying from the crown
+      for (int f = 0; f < 6; f++) {
+        const float a = -2.9f + f * 0.95f + k.sway * 0.08f;
+        float px = cx, py = cy;
+        for (int s = 1; s <= 5; s++) {
+          const float nx = cx + cosf(a) * s * 1.05f, ny = cy + sinf(a) * s * 1.05f + 0.09f * s * s;
+          cvLine(cv, px, py, nx, ny, dark, 1.0f);
+          px = nx; py = ny;
+        }
+      }
+      for (int b = 0; b < 2; b++) {                    // a pair of gulls gliding by
+        const float x = fmodf(t * 1.1f + b * 2.2f, 34.0f) - 5.0f, y = 5.5f + b * 1.3f + sinf(t * 0.7f + b) * 0.6f;
+        const float fl = 0.5f + 0.5f * sinf(t * 4.0f + b);
+        cvLine(cv, x - 1.0f, y - 0.4f * fl, x, y, dark, 0.8f);
+        cvLine(cv, x, y, x + 1.0f, y - 0.4f * fl, dark, 0.8f);
+      }
+      break;
+    }
+  }
+  cvFlush(cv);
+}
+const char _data_holiday_window[] PROGMEM =
+  "Holiday Window@Speed,Sparkle,Scene;;;2;sx=128,ix=128,c1=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -2371,6 +3052,8 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_ucf_knights,       _data_ucf_knights);      // 238 (sound reactive)
     add(&mode_autumn_harvest,    _data_autumn_harvest);   // 239
     add(&mode_star_wars,         _data_star_wars);        // 240
+    add(&mode_window_clock,      _data_window_clock);     // 241 (2D: the window matrix)
+    add(&mode_holiday_window,    _data_holiday_window);   // 242 (2D: the window matrix)
   }
 
   void loop() override {}
