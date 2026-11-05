@@ -29,6 +29,11 @@
  *   Autumn Harvest (239) - fall colors: Falling Leaves, Turning Leaves, Harvest Bulbs
  *   Star Wars (240)  - Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns
  *
+ * Strips in step: every strip (segment) running the same effect at the same Speed keeps the
+ * same timing, however far apart they were switched on: the clocks, tours, routines, game rounds
+ * and lightning strikes are shared (see "strips in step" below). Each strip still draws its own
+ * stars, leaves, duels and positions.
+ *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
  * Warm white comes from the dedicated W chip. Set White management to "Dual" (not "Accurate")
@@ -71,6 +76,94 @@ uint8_t slotColors(uint32_t out[3], uint32_t d0, uint32_t d1, uint32_t d2 = 0) {
 
 // pixels per bulb from a 0-255 slider: 1..8
 inline uint8_t bulbSize(uint8_t v) { return 1 + (v >> 5); }
+
+// ---------------------------------------------------------------- strips in step
+// WLED runs each segment (strip) on its own, so an effect's own clock, the start of a routine
+// (a look, a show, a game round) and its pauses used to count from when that strip got the
+// effect. Two strips set a few seconds apart (one group, then the other; or one after the other
+// from Home Assistant) then stayed that far apart for good: the Hyperspace jump, the marquee
+// chase, the reels... happened at different moments on each.
+// Now every strip running the same effect at the same Speed shares one timeline:
+//   fxClock()  the effect's own Speed-scaled clock
+//   fxMark()   when a routine started; a strip that starts it while another strip is running it
+//              picks up the same start, so it joins mid-way instead of starting its own
+//   fxRound()  rounds that start together (a spin, a game, a lightning strike)
+// A strip on its own carries on from its own time, so nothing jumps when it's the only one.
+// What each strip draws can still differ (its own stars, leaves, duel, positions); the timing
+// is what's shared.
+enum : uint8_t {   // effect numbers for the shared timeline (not the WLED ids)
+  SX_STORM, SX_SUNRISE, SX_MARQUEE, SX_NEON, SX_JACKPOT, SX_ROULETTE, SX_CANDY, SX_AUTUMN, SX_STARWARS
+};
+enum : uint8_t { SK_CLOCK = 250, SK_ROUND = 251 };    // keys; a routine's key is its look number
+
+struct FxSync { uint32_t at, seen, lastNow; float rem; uint8_t fx, key, speed, used; };
+static FxSync fxSyncs[16];
+constexpr uint32_t SYNC_LIVE_MS = 600;                // a strip that ran in the last 0.6 s is still running
+
+inline bool fxLive(const FxSync &s) { return s.used && strip.now - s.seen <= SYNC_LIVE_MS; }
+
+// the slot for (effect, key, speed); `fresh` says it was just made (or taken over)
+FxSync *fxSlot(uint8_t fx, uint8_t key, uint8_t speed, bool &fresh) {
+  fresh = false;
+  FxSync *spare = nullptr;
+  for (auto &s : fxSyncs) {
+    if (s.used && s.fx == fx && s.key == key && s.speed == speed) return &s;
+    if (!s.used) { if (!spare || spare->used) spare = &s; }
+    else if (strip.now - s.seen > 5000 && (!spare || (spare->used && s.seen < spare->seen))) spare = &s;
+  }
+  if (!spare) return nullptr;                          // all in use: the strip keeps its own time
+  spare->used = 1; spare->fx = fx; spare->key = key; spare->speed = speed;
+  spare->rem = 0; spare->lastNow = strip.now; spare->seen = strip.now;
+  fresh = true;
+  return spare;
+}
+
+// The effect's clock (ms of effect time), shared by every strip running it at this Speed.
+// rate = effect ms per real ms; `mine` is this strip's own clock, used when no other strip is running.
+uint32_t fxClock(uint8_t fx, uint8_t speed, float rate, uint32_t mine) {
+  bool fresh;
+  FxSync *s = fxSlot(fx, SK_CLOCK, speed, fresh);
+  if (!s) return mine;
+  const uint32_t now = strip.now;
+  if (fresh || !fxLive(*s)) { s->at = mine; s->rem = 0; s->lastNow = now; }
+  else if (now != s->lastNow) {                        // advance once a frame, whichever strip comes first
+    uint32_t d = now - s->lastNow;
+    if (d > 200) d = 200;                              // paused: don't catch up
+    const float adv = d * rate + s->rem;
+    s->at += (uint32_t)adv; s->rem = adv - (uint32_t)adv; s->lastNow = now;
+  }
+  s->seen = now;
+  return s->at;
+}
+
+// When routine `key` started, on the caller's timeline. `mine` is this strip's own value (or a new
+// start when it's just starting the routine); while another strip is running the routine, its
+// start wins.
+uint32_t fxMark(uint8_t fx, uint8_t key, uint8_t speed, uint32_t mine) {
+  bool fresh;
+  FxSync *s = fxSlot(fx, key, speed, fresh);
+  if (!s) return mine;
+  if (fresh || !fxLive(*s)) s->at = mine;
+  s->seen = strip.now;
+  return s->at;
+}
+
+// Rounds that start together. `over` = this strip is ready for its next round. Returns true when
+// the strip should start one now, with `start` set to when it began: a round another strip started
+// since this strip's last one (it joins it, if that was at most `late` ms ago), else a new one
+// starting now (the others will join).
+bool fxRound(uint8_t fx, uint8_t speed, uint32_t &start, bool over, uint32_t late) {
+  bool fresh;
+  FxSync *s = fxSlot(fx, SK_ROUND, speed, fresh);
+  const uint32_t now = strip.now;
+  if (!s) { if (over) start = now; return over; }
+  const bool newer = !fresh && fxLive(*s) && (int32_t)(s->at - start) > 0 && now - s->at <= late;
+  s->seen = now;
+  if (!over) return false;
+  if (newer) start = s->at;
+  else { start = now; s->at = now; }
+  return true;
+}
 
 // ---------------------------------------------------------------- Holiday Bulbs
 // Alternating bulbs. Speed = how fast colors move along (0 = still), Bulb size = pixels per bulb.
@@ -276,7 +369,26 @@ const char _data_ocean_swell[] PROGMEM = "Ocean Swell@Wave speed,Whitecaps;!,!;;
 // ---------------------------------------------------------------- Lightning Storm
 // Dim moving cloud glow in color 1, with lightning: a burst of 2-4 bright flashes on a
 // random section, then a random pause. Speed = how often, Intensity = flash size.
-struct Storm { uint32_t next; uint16_t start; uint16_t width; uint8_t flashes; uint8_t lit; };
+// The strikes are shared by every strip in a storm at the same Strike rate, so a flash lights
+// them all at once (like the whole sky), each on its own section. A strike's flashes and the pause
+// after it come from when it began, so every strip works out the same ones.
+struct Storm { uint32_t at, posFor; uint16_t start, width; };
+
+inline uint32_t stormHash(uint32_t x) { x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16; return x; }
+// is the strike that began at `at` lit `d` ms in? (2-4 flashes, each 30-99 ms, 50-199 ms apart)
+bool stormLit(uint32_t at, uint32_t d, uint32_t &length) {
+  const uint8_t n = 2 + stormHash(at) % 3;
+  uint32_t x = 0;
+  bool lit = false;
+  for (uint8_t k = 0; k < n; k++) {
+    const uint32_t on = 30 + stormHash(at + 977u * (k + 1)) % 70;
+    if (d >= x && d < x + on) lit = true;
+    x += on;
+    if (k + 1 < n) x += 50 + stormHash(at + 1931u * (k + 1)) % 150;
+  }
+  length = x;
+  return lit;
+}
 
 void mode_lightning_storm() {
   const int len = SEGLEN;
@@ -285,37 +397,41 @@ void mode_lightning_storm() {
   uint32_t cols[3];
   slotColors(cols, RGBW32(10, 20, 70, 0), WARM);
   const uint32_t cloud = cols[0];
-
-  if (SEGENV.call == 0) s->next = strip.now + 800;
+  const uint32_t now = strip.now;
 
   // background clouds
   for (int i = 0; i < len; i++) {
     uint32_t c = BLACK;
     if (SEGMENT.check1) {
-      const uint8_t nz = perlin8(i * 24, strip.now >> 4);
+      const uint8_t nz = perlin8(i * 24, now >> 4);
       c = color_fade(cloud, 40 + sc8(nz, 120), true);
     }
     SEGMENT.setPixelColor(i, c);
   }
 
-  if (strip.now >= s->next) {
-    if (s->flashes == 0) {
-      // start a new strike
-      s->flashes = 2 + hw_random8(3);
-      s->width = max(2, (int)((uint32_t)len * (16 + SEGMENT.intensity) / 400));
-      s->start = hw_random16(max(1, len - s->width + 1));
-      s->lit = 0;
-    }
-    s->lit = !s->lit;
-    if (s->lit) {
-      s->next = strip.now + 30 + hw_random8(70);     // flash on
-    } else {
-      s->flashes--;
-      s->next = strip.now + (s->flashes ? 50 + hw_random8(150)          // gap between flashes
-                                        : 600 + (uint32_t)(255 - SEGMENT.speed) * 60 + hw_random16(4000)); // pause
-    }
+  // The strikes follow one chain: each starts when the last one's flashes and pause are over (the
+  // pause is longer at a lower Strike rate). The first comes 0.8 s after the storm starts, unless a
+  // storm is already on in another strip: then this strip follows its chain.
+  bool fresh;
+  FxSync *sh = fxSlot(SX_STORM, SK_ROUND, SEGMENT.speed, fresh);
+  const bool others = sh && !fresh && fxLive(*sh);
+  if (SEGENV.call == 0) s->at = others ? sh->at : now + 800;
+  else if (others && (int32_t)(sh->at - s->at) > 0) s->at = sh->at;   // another strip's chain is ahead: follow it
+  uint32_t length;
+  for (uint8_t guard = 0; guard < 50 && (int32_t)(now - s->at) >= 0; guard++) {
+    stormLit(s->at, 0, length);
+    const uint32_t next = s->at + length + 600 + (uint32_t)(255 - SEGMENT.speed) * 60 + stormHash(s->at + 7) % 4000;
+    if ((int32_t)(now - next) < 0) break;
+    s->at = next;
   }
-  if (s->lit) {
+  if (sh) { if (!others || (int32_t)(s->at - sh->at) > 0) sh->at = s->at; sh->seen = now; }
+  if (s->posFor != s->at) {                          // a new strike: where it hits this strip
+    s->posFor = s->at;
+    s->width = max(2, (int)((uint32_t)len * (16 + SEGMENT.intensity) / 400));
+    s->start = hw_random16(max(1, len - s->width + 1));
+  }
+  const bool lit = (int32_t)(now - s->at) >= 0 && stormLit(s->at, now - s->at, length);
+  if (lit) {
     const uint32_t bolt = cols[1] == WARM ? RGBW32(140, 140, 255, 255) : cols[1];
     for (int i = s->start; i < s->start + s->width && i < len; i++) {
       // brighter core, softer edges
@@ -330,12 +446,15 @@ const char _data_lightning_storm[] PROGMEM =
 // ---------------------------------------------------------------- Sunrise
 // Night -> deep red -> orange -> warm white over 1-64 minutes (Speed). Checkbox = Sunset
 // (runs backwards). Starts over whenever the effect is selected, so it works from a preset
-// fired by an alarm or automation.
+// fired by an alarm or automation. A strip that starts it while another strip is already in a
+// sunrise (same Minutes) joins that one, so the whole house brightens together.
 void mode_sunrise() {
   const int len = SEGLEN;
   if (len < 1 || !SEGENV.allocateData(sizeof(uint32_t))) { staticFallback(); return; }
   uint32_t *start = reinterpret_cast<uint32_t *>(SEGENV.data);
   if (SEGENV.call == 0) *start = strip.now;
+  // a strip that starts the sunrise while another strip is in one joins it, so they brighten together
+  *start = fxMark(SX_SUNRISE, 0, SEGMENT.speed, *start);
   const uint32_t duration = (1 + (SEGMENT.speed >> 2)) * 60000UL;
   const uint32_t el = strip.now - *start;
   uint16_t p = el >= duration ? 65535 : (uint16_t)(((uint64_t)el * 65535) / duration);
@@ -674,12 +793,16 @@ void mode_vegas_marquee() {
   const int nb = (len + cell - 1) / cell;
 
   if (SEGENV.call == 0) { st->sceneStart = now; st->last = now; st->scene = 0; }
+  // when the show started: shared with the other strips running Vegas Marquee at this Speed, so
+  // the chase steps and the routines change together on every strip
+  st->sceneStart = fxMark(SX_MARQUEE, 0, SEGMENT.speed, st->sceneStart);
   const uint32_t stepMs = 420 - (uint32_t)SEGMENT.speed * 3 / 2;  // 420 .. 38 ms per step
+  uint32_t el = now - st->sceneStart;                       // time into the routine
   if (SEGMENT.custom1) {
     const uint32_t dur = 2500 + (uint32_t)(255 - SEGMENT.custom1) * 50;  // ~15 s .. 2.5 s per routine
-    if (now - st->sceneStart >= dur) { st->sceneStart = now; st->scene = (st->scene + 1) % 6; }
+    st->scene = (el / dur) % 6;
+    el %= dur;
   } else st->scene = 0;
-  const uint32_t el = now - st->sceneStart;
   const uint32_t steps = el / stepMs;
   const uint32_t fillMs = 1200 + stepMs * 10;               // fill / empty sweep time
 
@@ -758,6 +881,8 @@ void mode_neon_sign() {
 
   const uint32_t now = strip.now;
   if (SEGENV.call == 0) SEGENV.step = now;                  // power-on time
+  // shared with the other strips running Neon Sign at this Speed, so the sign animates in step
+  SEGENV.step = fxMark(SX_NEON, 0, SEGMENT.speed, SEGENV.step);
   const uint32_t on = now - SEGENV.step;
   const int tl = 4 + (SEGMENT.intensity >> 3);              // tube length 4..35
   const int pitch = tl + 1;
@@ -825,7 +950,7 @@ const char _data_neon_sign[] PROGMEM =
 // gold lights chase along the whole strip with a shower of sparkling coins. Otherwise it holds
 // the result for a moment (center symbols bright, the rest dim) and spins again.
 //   Pace, Jackpot odds (0 = about 1 spin in 30, max = most spins), Reels (3-7)
-struct Reel { float p0, pf; uint32_t stop; };
+struct Reel { float p0, pf, v; uint32_t stop; };     // v: this reel's spin speed (pixels per ms)
 struct SlotGame { uint32_t start, end; uint8_t nr, win; uint8_t sym[8]; Reel reel[8]; };
 constexpr uint8_t NSYM = 6;
 const uint32_t SYMBOLS[NSYM] = {
@@ -853,22 +978,31 @@ void mode_jackpot() {
   const float v = s * (8.0f + SEGMENT.speed / 32.0f) / 1000.0f;  // spin speed, pixels per ms
   const uint32_t A = 300, D = 450;                          // spin-up and slow-down times, ms
 
-  // ---- new round
-  if (SEGENV.call == 0 || g->nr != nr || (int32_t)(now - g->end) >= 0) {
-    const bool fresh = SEGENV.call == 0 || g->nr != nr;
+  // ---- new round: every strip with Jackpot at this Speed plays the same game together. The first
+  // strip whose round is over deals the next one (outcome and end), the others join it.
+  static struct { uint32_t at, end, stop[8]; uint8_t nr, win, sym[8]; } dealt = { 0, 0, {}, 0, 0, {} };
+  const bool fresh = SEGENV.call == 0 || g->nr != nr;
+  uint32_t roundAt = fresh ? now - 100000 : g->start;
+  if (fxRound(SX_JACKPOT, SEGMENT.speed, roundAt, fresh || (int32_t)(now - g->end) >= 0, fresh ? UINT32_MAX : 3000)) {
     g->nr = nr;
-    g->start = now;
-    const uint8_t odds = 8 + ((SEGMENT.intensity * 3) >> 2);   // chance out of 256: 8..199
-    g->win = hw_random8() < odds;
-    if (g->win) {
-      const uint8_t sy = hw_random8(NSYM);
-      for (int r = 0; r < nr; r++) g->sym[r] = sy;
+    g->start = roundAt;
+    const bool join = dealt.at == roundAt && dealt.nr == nr;   // another strip dealt this round
+    if (join) {
+      g->win = dealt.win;
+      for (int r = 0; r < nr; r++) g->sym[r] = dealt.sym[r];
     } else {
-      for (int r = 0; r < nr; r++) g->sym[r] = hw_random8(NSYM);
-      if (hw_random8() < 100) for (int r = 1; r < nr - 1; r++) g->sym[r] = g->sym[0];   // near miss
-      bool same = nr > 1;
-      for (int r = 1; r < nr; r++) if (g->sym[r] != g->sym[0]) same = false;
-      if (same) g->sym[nr - 1] = (g->sym[0] + 1 + hw_random8(NSYM - 1)) % NSYM;      // not a win
+      const uint8_t odds = 8 + ((SEGMENT.intensity * 3) >> 2);   // chance out of 256: 8..199
+      g->win = hw_random8() < odds;
+      if (g->win) {
+        const uint8_t sy = hw_random8(NSYM);
+        for (int r = 0; r < nr; r++) g->sym[r] = sy;
+      } else {
+        for (int r = 0; r < nr; r++) g->sym[r] = hw_random8(NSYM);
+        if (hw_random8() < 100) for (int r = 1; r < nr - 1; r++) g->sym[r] = g->sym[0];   // near miss
+        bool same = nr > 1;
+        for (int r = 1; r < nr; r++) if (g->sym[r] != g->sym[0]) same = false;
+        if (same) g->sym[nr - 1] = (g->sym[0] + 1 + hw_random8(NSYM - 1)) % NSYM;      // not a win
+      }
     }
     uint32_t prevStop = 0;
     for (int r = 0; r < nr; r++) {
@@ -884,13 +1018,28 @@ void mode_jackpot() {
       const uint32_t base = 1600 - SEGMENT.speed * 3;            // 1600 .. 835 ms
       const uint32_t stagger = 650 - (SEGMENT.speed * 3) / 2;    // 650 .. 268 ms
       const uint32_t nom = r == 0 ? base : prevStop + stagger;
-      const float dNom = v * (nom - A / 2.0f - D / 2.0f);
       float need = fmodf(pf - rl.p0, C); if (need < 0) need += C;
-      float extra = fmodf(need - dNom, C); if (extra < 0) extra += C;
-      rl.stop = nom + (uint32_t)(extra / v);
+      if (join) {
+        // stop when the dealer's reel stops: spin a touch faster or slower to land on the symbol
+        rl.stop = dealt.stop[r];
+        const float run = rl.stop - A / 2.0f - D / 2.0f;       // the reel covers v * run pixels
+        float turns = roundf((v * run - need) / C);
+        if (need + turns * C <= 0) turns += 1;
+        rl.v = (need + turns * C) / run;
+      } else {
+        const float dNom = v * (nom - A / 2.0f - D / 2.0f);
+        float extra = fmodf(need - dNom, C); if (extra < 0) extra += C;
+        rl.stop = nom + (uint32_t)(extra / v);
+        rl.v = v;
+      }
       prevStop = rl.stop;
     }
-    g->end = now + prevStop + 400 + (g->win ? 5600 : 1500);
+    if (join) g->end = dealt.end;                      // finish together, so the next round starts together
+    else {
+      g->end = roundAt + prevStop + 400 + (g->win ? 5600 : 1500);
+      dealt.at = roundAt; dealt.end = g->end; dealt.nr = nr; dealt.win = g->win;
+      for (int r = 0; r < nr; r++) { dealt.sym[r] = g->sym[r]; dealt.stop[r] = g->reel[r].stop; }
+    }
   }
 
   const uint32_t t = now - g->start;
@@ -903,11 +1052,12 @@ void mode_jackpot() {
   for (int r = 0; r < nr; r++) {
     const Reel &rl = g->reel[r];
     float p;
-    if (t < A) p = rl.p0 + v * t * t / (2.0f * A);
-    else if (t + D < rl.stop) p = rl.p0 + v * (A / 2.0f) + v * (t - A);
+    const float rv = rl.v;
+    if (t < A) p = rl.p0 + rv * t * t / (2.0f * A);
+    else if (t + D < rl.stop) p = rl.p0 + rv * (A / 2.0f) + rv * (t - A);
     else if (t < rl.stop) {
       const float x = (float)(t - (rl.stop - D)) / D;
-      p = rl.p0 + v * (A / 2.0f) + v * (rl.stop - D - A) + v * D * (x - x * x / 2.0f);
+      p = rl.p0 + rv * (A / 2.0f) + rv * (rl.stop - D - A) + rv * D * (x - x * x / 2.0f);
     } else {
       const float a = (float)(t - rl.stop);                       // bounce: a little past, then back
       p = rl.pf + (a < 600 ? 0.15f * s * sinf(a * 0.022f) * expf(-a * 0.009f) : 0.0f);
@@ -988,14 +1138,18 @@ void mode_roulette() {
   float t = (float)(now - w->start);
   // ball and wheel, both slowing exponentially (wheel turns backwards, slowly)
   auto wheelAt = [&](float tt) { return w->w0 - w->vb0 * 0.18f * tauW * (1.0f - expf(-tt / tauW)); };
-  if (w->phase == 2 && t > w->tDrop + settleMs + showMs) {
-    // new spin: start from where the ball and wheel are now
+  // new spin: when this wheel's last one is over; every strip with Roulette at this Speed spins
+  // together (a strip that's done joins a spin another strip just started)
+  uint32_t spinAt = w->start;
+  const bool over = w->phase == 2 && t > w->tDrop + settleMs + showMs;
+  if (fxRound(SX_ROULETTE, SEGMENT.speed, spinAt, over, SEGENV.call == 0 ? UINT32_MAX : 3000)) {
+    // start from where the ball and wheel are now
     const float wNow = wheelAt(t);
     float bNow = w->phase == 2 && w->vb0 > 0 ? w->target + wNow : w->b0;
     w->w0 = fmodf(wNow, W); if (w->w0 < 0) w->w0 += W;
     w->b0 = fmodf(bNow, (float)len); if (w->b0 < 0) w->b0 += len;
     w->vb0 = max(0.12f, len * 0.0011f) * (0.55f + SEGMENT.speed / 300.0f);   // px per ms
-    w->start = now; t = 0;
+    w->start = spinAt; t = (float)(now - spinAt);
     w->tDrop = tauB * logf(w->vb0 / vDrop);
     if (w->tDrop < 1200) w->tDrop = 1200;
     w->phase = 0;
@@ -1390,10 +1544,13 @@ void mode_candy_land() {
   uint32_t dt = now - st->last;
   st->last = now;
   if (dt > 200) dt = 200;
-  // candy time: Speed 128 = real time, 0 = a quarter, 255 = 1.75x
-  const float adv = dt * (0.25f + SEGMENT.speed / 170.0f) + st->rem;
+  // candy time: Speed 128 = real time, 0 = a quarter, 255 = 1.75x; shared with the other strips
+  // running Candy Land at this Speed, so the path, gumdrops and swirl move in step
+  const float rate = 0.25f + SEGMENT.speed / 170.0f;
+  const float adv = dt * rate + st->rem;
   st->ct += (uint32_t)adv;
   st->rem = adv - (uint32_t)adv;
+  st->ct = fxClock(SX_CANDY, SEGMENT.speed, rate, st->ct);
 
   static CandyCtx x;              // big (gumdrops): static, not on the stack
   x.len = len; x.ct = st->ct; x.now = now; x.den = SEGMENT.intensity / 255.0f;
@@ -1712,6 +1869,11 @@ void mode_autumn_harvest() {
   const float ft = st->ct / 1000.0f, fdt = dt * sp;
   // noise inputs from fall time, through uint32 so they wrap instead of overflowing the float conversion
   auto tq = [&](float k) { return (uint16_t)(uint32_t)(ft * k); };
+  // Turning Leaves and Harvest Bulbs run on the fall time every strip with Autumn Harvest at this
+  // Speed shares, so their colors turn and step together; the falling leaves and gusts are each
+  // strip's own
+  const uint32_t S = fxClock(SX_AUTUMN, SEGMENT.speed, sp, st->ct);
+  auto sq = [&](float k) { return (uint16_t)(uint32_t)(S / 1000.0f * k); };
 
   // the wind: calm most of the time, a gust every so often
   float g = (perlin8(tq(40.0f), (uint16_t)seed) / 255.0f - 0.5f) / 0.3f;
@@ -1756,12 +1918,12 @@ void mode_autumn_harvest() {
   };
   auto turning = [&](int i) -> Rgbw {
     // where this leaf is in its turn: neighbours drift together, each with its own lag
-    float u = perlin8((uint16_t)(i * 48 + seed), tq(6.0f)) / 255.0f * 1.6f + h01(i, seed, 11) * 0.5f + (st->ct % 100000) * 1e-5f;
+    float u = perlin8((uint16_t)(i * 48 + seed), sq(6.0f)) / 255.0f * 1.6f + h01(i, seed, 11) * 0.5f + (S % 100000) * 1e-5f;
     u -= floorf(u);
     Rgbw c;
     if (mine) { const float v = u * nc; const int a = (int)v % nc; c = mixC(col[a], col[(a + 1) % nc], easeC(v - (int)v)); }
     else { const float v = u * 6; const int a = (int)v % 6; c = mixC(col[TURN_ORDER[a]], col[TURN_ORDER[(a + 1) % 6]], easeC(v - (int)v)); }
-    float bri = 0.62f + 0.38f * perlin8((uint16_t)(i * 97 + 500), tq(90.0f)) / 255.0f;   // rustling
+    float bri = 0.62f + 0.38f * perlin8((uint16_t)(i * 97 + 500), sq(90.0f)) / 255.0f;   // rustling
     if (st->rustling) {
       const float d = i - st->rustleX, w = expf(-d * d / 6.0f);
       bri += 0.5f * w;
@@ -1773,12 +1935,12 @@ void mode_autumn_harvest() {
     const uint8_t n = mine ? nc : 4;
     auto bc = [&](int64_t k) { k %= n; if (k < 0) k += n; return mine ? col[k] : unpackC(HARVEST_BULBS[k]); };
     // the colors step one bulb toward the end every 6 fall-seconds, crossfading over 1.2 s
-    const int64_t s = st->ct / 6000;
-    float f = (st->ct % 6000) / 1200.0f;
+    const int64_t s = S / 6000;
+    float f = (S % 6000) / 1200.0f;
     f = f >= 1.0f ? 1.0f : easeC(f);
     Rgbw c = mixC(bc(i - s + 1), bc(i - s), f);
     // filament: each bulb glows a little unevenly, with a faint flicker
-    float bri = 0.82f + 0.13f * perlin8((uint16_t)(i * 83 + seed), tq(20.0f)) / 255.0f
+    float bri = 0.82f + 0.13f * perlin8((uint16_t)(i * 83 + seed), sq(20.0f)) / 255.0f
               + 0.05f * h01(i, now / 90, seed + 5);
     const uint32_t L = 1100, t = now + (uint32_t)(h01(i, seed, 6) * L), slot = t / L;
     if (h01(i, slot, seed + 7) < den * 0.16f) {      // a twinkle
@@ -1851,8 +2013,8 @@ struct StarWarsState {
   SwBolt bolts[SW_BOLTS];
   SwBoom booms[SW_BOOMS];
   float jediX, jediT, nextJedi;
-  // hyperspace
-  uint32_t hyperAt;
+  // hyperspace (hyperAt is on the shared clock, sharedT the shared clock last frame)
+  uint32_t hyperAt, sharedT;
   float dist, flow;
 };
 
@@ -1886,7 +2048,11 @@ void mode_star_wars() {
   s->st += (uint32_t)adv;
   s->rem = adv - (uint32_t)adv;
   const float fdt = dt * sp;
-  const uint32_t T = s->st;
+  const uint32_t T = s->st;                           // this strip's own time: its duel and blaster fight
+  // the time every strip running Star Wars at this Speed shares: Hyperspace and Twin Suns
+  const uint32_t S = fxClock(SX_STARWARS, SEGMENT.speed, sp, s->st);
+  const bool rejoined = (int32_t)(S - s->sharedT) < 0 || S - s->sharedT > 1000;   // just started, or picked up another strip's time
+  s->sharedT = S;
 
   // which look (Tour: 25 s each with a 1.5 s crossfade); a look that just came up starts from the top
   const uint8_t lk = (uint16_t)SEGMENT.custom1 * 5 >> 8;   // 0 duel, 1 blasters, 2 hyperspace, 3 suns, 4 tour
@@ -1897,11 +2063,14 @@ void mode_star_wars() {
     a = (now / per) % 4;
     if (f < 1500) { b = (a + 3) % 4; kf = f / 1500.0f; }
   }
-  if (a != s->look) {
+  const bool entered = a != s->look;
+  if (entered) {
     if (a == 0) { s->phase = SD_DARK; s->moveEnd = T + 500; s->fh = s->fv = 0; s->nSparks = 0; }
-    if (a == 2) s->hyperAt = T - 1500;                // the jump comes about 3 s in
     s->look = a;
   }
+  // Hyperspace starts from the top (the jump about 3 s in), or in step with a strip already in it
+  if (a == 2 || b == 2)
+    s->hyperAt = fxMark(SX_STARWARS, 2, SEGMENT.speed, (entered && a == 2) || rejoined ? S - 1500 : s->hyperAt);
 
   // ---------------- the duel
   Rgbw hero = unpackC(SW_HERO[s->duels % 3]), villain = unpackC(SW_VILLAIN);
@@ -2034,7 +2203,7 @@ void mode_star_wars() {
   }
 
   // ---------------- hyperspace (a 17 s cycle: cruise, stretch, flash, tunnel, drop out)
-  const uint32_t h = (T - s->hyperAt) % 17000;
+  const uint32_t h = (S - s->hyperAt) % 17000;
   float hs;                                             // how fast the stars go by
   if (h < 4500 || h >= 15000) hs = 1.0f;
   else if (h < 6500) { const float u = (h - 4500) / 2000.0f; hs = 1.0f + 90.0f * u * u * u; }
@@ -2141,12 +2310,12 @@ void mode_star_wars() {
     return c;
   };
   auto suns = [&](int i) -> Rgbw {
-    const float span = L + 14.0f, p1 = fmodf(T / 100000.0f * span, span) - 7.0f, p2 = p1 - L * 0.13f - 1.5f;
+    const float span = L + 14.0f, p1 = fmodf((S % 100000) / 100000.0f * span, span) - 7.0f, p2 = p1 - L * 0.13f - 1.5f;
     const float d = min(fabsf(i - p1), fabsf(i - p2)) / max(10.0f, L * 0.45f);
     const Rgbw GOLD = { 255, 110, 8, 30 }, CORAL = { 230, 40, 50, 0 }, DUSK = { 50, 12, 100, 0 }, NIGHT = { 14, 4, 48, 0 };
     Rgbw c = d < 0.5f ? mixC(GOLD, CORAL, d * 2.0f) : d < 1.0f ? mixC(CORAL, DUSK, (d - 0.5f) * 2.0f)
            : mixC(DUSK, NIGHT, constrain((d - 1.0f) / 0.6f, 0.0f, 1.0f));
-    c = scaleC(c, 0.88f + 0.12f * perlin8((uint16_t)(i * 60 + seed), (uint16_t)(T / 40)) / 255.0f);   // heat shimmer
+    c = scaleC(c, 0.88f + 0.12f * perlin8((uint16_t)(i * 60 + seed), (uint16_t)(S / 40)) / 255.0f);   // heat shimmer
     add(c, Rgbw{ 255, 190, 110, 190 }, expf(-(i - p1) * (i - p1) / 0.9f));
     add(c, Rgbw{ 255, 140, 50, 110 }, expf(-(i - p2) * (i - p2) / 0.6f));
     return c;
@@ -2212,8 +2381,8 @@ class CoastalFxUsermod : public Usermod {
     if (user.isNull()) user = root.createNestedObject("u");
     JsonArray arr = user.createNestedArray(F("Coastal FX"));
     if (firstId == 255) { arr.add(F("not loaded")); return; }
-    char buf[24];
-    snprintf_P(buf, sizeof(buf), PSTR("ids %u-%u"), firstId, lastId);
+    char buf[40];
+    snprintf_P(buf, sizeof(buf), PSTR("ids %u-%u, strips in step"), firstId, lastId);
     arr.add(buf);
   }
 };

@@ -106,7 +106,8 @@ so speed changes are smooth.
 | Tour (204–255, default) | The four in turn, 25 seconds each; each starts from its beginning, so the duel always opens with the ignition |
 
 Controls: Speed, **Action** (how often they strike and shoot, how many sparks and stars), Look,
-**My colors** (slot 1 = the hero's saber, slot 2 = the villain's). Each segment fights its own duel.
+**My colors** (slot 1 = the hero's saber, slot 2 = the villain's). Each segment fights its own duel;
+Hyperspace and Twin Suns run in step on every strip.
 
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
@@ -115,7 +116,27 @@ If a color slot is black the effect uses a default (red/green for the holiday ef
 red/white/blue for fireworks, blue/teal for the ocean).
 
 Effect IDs on this build: **220–240** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-240" when the firmware is running.
+"Coastal FX: ids 220-240, strips in step" when the firmware is running.
+
+## Strips in step
+Every strip (segment) running the same effect at the same Speed keeps the same timing, however far
+apart they were switched on or set (one group and then the other, one after the other from Home
+Assistant, a strip turned off and on again). Before this, each strip counted from when it got the
+effect, so they stayed that many seconds apart: the Hyperspace jump came at different moments on
+the patio and side strips.
+
+| Shared now | Effects |
+|---|---|
+| The effect's own clock | Star Wars (Hyperspace, Twin Suns), Candy Land, Autumn Harvest (Turning Leaves, Harvest Bulbs) |
+| When the routine started | Vegas Marquee (chase steps and routine changes), Neon Sign (animation), Sunrise, Hyperspace's 17 s cycle |
+| The rounds | Jackpot (the same game, reels stopping together, the payout together), Roulette (spins start together) |
+| The strikes | Lightning Storm: every strip flashes at once, each on its own section |
+
+Already in step (they run on the board's clock): Holiday Bulbs, Candy Cane, Ocean Swell, Pool
+Shimmer, Northern Lights, Dancing Fountains, Showgirl Sparkle, and the Tours. Each strip still draws
+its own stars, leaves, sparkles, duels and blaster fights; it's the timing that's shared. A strip
+at a different Speed keeps its own timing. A strip that starts an effect another strip is already
+running picks it up mid-way (a sunrise on one strip, then the other: both brighten together).
 
 ## Build (GitHub, no software to install)
 
@@ -139,7 +160,7 @@ Effect IDs on this build: **220–240** in the order above. The WLED Info page s
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-240".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-240, strips in step".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
