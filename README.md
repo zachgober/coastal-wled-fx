@@ -1,6 +1,6 @@
 # Coastal FX — custom WLED effects
 
-Twenty-one custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support).
+Twenty-three custom effects compiled into WLED 16.0.1 for the WeGoIOT ESP32 box (keeps the microphone / AudioReactive support). The last two are for the LED matrix in the office window (2D); the same `.bin` runs on any classic ESP32 board.
 
 **Direction:** everything that travels (bulbs, stripes, waves, chases, reels, candy) moves from the
 segment's first pixel toward its last, the same way WLED's own chases run. To make a strip run the
@@ -115,8 +115,38 @@ the strip was showing before. Tick **My colors** to use color slots 1–3 instea
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–240** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-240, strips in step" when the firmware is running.
+Effect IDs on this build: **220–242** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-242, strips in step" when the firmware is running.
+
+### Window matrix (2D, ids 241–242)
+
+![Window matrix](effect-preview-window.png)
+
+For the office window: SK6812 RGBW chips wired as a **24 × 24 grid** (serpentine) on their own ESP32
+board, set up as a matrix in Config → **2D Configuration**. Both effects draw on a 24 × 24 design
+grid scaled to the matrix and centered, so other sizes work too. They only appear in WLED's effect
+list once the board has a 2D matrix; on a strip they show color 1.
+
+| Effect | What it does | Controls |
+|---|---|---|
+| Window Clock | The time in big 4×7 digits (amber), an info line under it in small letters (aqua), and a band along the bottom. The info line is the **segment's name**: Home Assistant writes the weather and pool temperature there (`78° POOL 84°`); text too wide scrolls. No name: the weekday and date. Time comes from WLED's clock (Config → Time & Macros: NTP and time zone) | Speed, Glow (background brightness), Look (Coastal waves / Starry night / Holiday colors by date / Plain, in quarters), My colors (1 time, 2 info, 3 background), 24 hour, Blink colon |
+| Holiday Window | Animated scenes. **Auto** (Scene 0–31, default) picks by the date: Halloween all October, Thanksgiving through Thanksgiving Day, Christmas from the day after to Dec 30, Fireworks on Dec 31, Jan 1 and July 1–5, Valentine's Feb 1–14, St. Patrick's Mar 1–17, Coastal the rest of the year | Speed, Sparkle (snow, stars, bats, leaves, twinkles, how busy the fireworks are), Scene |
+
+| Scene (slider) | What it shows |
+|---|---|
+| Auto (0–31) | The scene for today's date (Coastal until the clock is set) |
+| Halloween (32–63) | A jack-o'-lantern flickering by candlelight under the moon, bats flapping across, twinkling stars |
+| Thanksgiving (64–95) | A turkey fanning its red, orange and gold tail, bobbing and pecking now and then, leaves blowing past |
+| Christmas (96–127) | A tree with twinkling bulbs, a shining star, presents underneath, snow falling |
+| Fireworks (128–159) | Rockets rising and bursting: peonies, rings, gold willows and white crackle over a dark skyline |
+| Valentine's (160–191) | A heart beating (lub-dub), little hearts floating up, sparkles |
+| St. Patrick's (192–223) | A shamrock with a shimmer running across it, gold glints falling |
+| Coastal (224–255) | A sunset over the water: the sun going down into the sea (45 s) with glitter on the waves, a palm swaying, gulls gliding, stars after dark, then the sun comes back up |
+
+**Pictures and GIFs:** WLED's own **Image** effect plays a GIF from the board's file system: upload
+it (24 × 24 is best, it's scaled otherwise) with **Pixel Forge** (`http://<board>/pixelforge.htm`)
+or the file editor (`/edit`), then set the segment's name to the file name (`pumpkin.gif`) and pick
+Image. WLED's **Scrolling Text** works on the matrix too.
 
 ## Strips in step
 Every strip (segment) running the same effect at the same Speed keeps the same timing, however far
@@ -160,7 +190,7 @@ running picks it up mid-way (a sunrise on one strip, then the other: both bright
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-240, strips in step".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-242, strips in step".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
