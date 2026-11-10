@@ -28,6 +28,7 @@
  *   UCF Knights (238)- black and gold game day that moves to sound (mic): Charge On, Bounce House, Crowd Roar
  *   Autumn Harvest (239) - fall colors: Falling Leaves, Turning Leaves, Harvest Bulbs
  *   Star Wars (240)  - Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns
+ *   Psychedelic (241) - trippy and mellow: Lava Lamp, Oil Slick, Black Light, Melt
  *
  * Strips in step: every strip (segment) running the same effect at the same Speed keeps the
  * same timing, however far apart they were switched on: the clocks, tours, routines, game rounds
@@ -92,7 +93,7 @@ inline uint8_t bulbSize(uint8_t v) { return 1 + (v >> 5); }
 // What each strip draws can still differ (its own stars, leaves, duel, positions); the timing
 // is what's shared.
 enum : uint8_t {   // effect numbers for the shared timeline (not the WLED ids)
-  SX_STORM, SX_SUNRISE, SX_MARQUEE, SX_NEON, SX_JACKPOT, SX_ROULETTE, SX_CANDY, SX_AUTUMN, SX_STARWARS
+  SX_STORM, SX_SUNRISE, SX_MARQUEE, SX_NEON, SX_JACKPOT, SX_ROULETTE, SX_CANDY, SX_AUTUMN, SX_STARWARS, SX_TRIP
 };
 enum : uint8_t { SK_CLOCK = 250, SK_ROUND = 251 };    // keys; a routine's key is its look number
 
@@ -2332,6 +2333,217 @@ void mode_star_wars() {
 const char _data_star_wars[] PROGMEM =
   "Star Wars@Speed,Action,Look,,,My colors;Hero,Villain,!;;1;sx=128,ix=128,c1=255,o1=0";
 
+// ================================================================ Psychedelic (241)
+// Trippy, slow-moving color for a mellow night, in four looks picked with the Look slider (in fifths):
+//   0-50    Lava Lamp   - big soft blobs of glowing wax rising and sinking along the strip,
+//                         merging and splitting; the wax slowly changes color (orange, hot pink,
+//                         magenta, violet, red) over a deep glow
+//   51-101  Oil Slick   - iridescent swirls like oil on water: film colors flowing and folding into
+//                         each other, with dark ripples and a little sheen between them
+//   102-152 Black Light - a dim ultraviolet glow, breathing slowly, where fluorescent splashes
+//                         (neon green, hot pink, orange, yellow, aqua) bloom, glow and fade away
+//   153-203 Melt        - a kaleidoscope: rainbow rings pouring out of the middle of the strip both
+//                         ways, with moire pulses that swell and fade and a slow wave of light
+//   204-255 Tour        - the four in turn, 25 s each, with a slow crossfade (the default)
+//   Speed (1x at 128; the default 96 is a little slower), Trip (how much is going on: blobs,
+//   splashes, swirl detail, rings), Look
+//   Checkbox "My colors": slot 1 = the wax and slot 2 = the glow behind it (Lava Lamp), slots 1-3 =
+//   the fluorescent colors (Black Light); Oil Slick and Melt are always the full rainbow
+// It keeps its own clock ("trip time") that runs faster or slower with Speed, shared with the other
+// strips running Psychedelic at the same Speed, so they melt and swirl together. The black light
+// splashes are each strip's own.
+const uint32_t LAVA_WAX[5] = {
+  RGBW32(255, 70, 0, 0),     // orange
+  RGBW32(255, 10, 90, 0),    // hot pink
+  RGBW32(220, 0, 200, 0),    // magenta
+  RGBW32(110, 0, 255, 0),    // violet
+  RGBW32(255, 0, 20, 0),     // red
+};
+const uint32_t BLACKLIGHT[5] = {
+  RGBW32(60, 255, 0, 0),     // neon green
+  RGBW32(255, 0, 150, 0),    // hot pink
+  RGBW32(255, 80, 0, 0),     // blaze orange
+  RGBW32(210, 255, 0, 0),    // electric yellow
+  RGBW32(0, 255, 170, 0),    // aqua
+};
+constexpr uint8_t MAX_SPLATS = 12;
+
+struct Splat { float x, age, life, size, drift; uint8_t col; };
+struct TripState {
+  uint32_t last, tt;                                  // trip time in whole ms
+  float rem, nextSplat;
+  Splat sp[MAX_SPLATS];
+  uint8_t n;
+};
+
+// the rainbow: 0..1 around the color wheel, full saturation
+inline Rgbw hueC(float h) {
+  h -= floorf(h); h *= 6.0f;
+  const int k = (int)h; const float f = h - k;
+  switch (k) {
+    case 0:  return { 255.0f, 255.0f * f, 0, 0 };
+    case 1:  return { 255.0f * (1 - f), 255.0f, 0, 0 };
+    case 2:  return { 0, 255.0f, 255.0f * f, 0 };
+    case 3:  return { 0, 255.0f * (1 - f), 255.0f, 0 };
+    case 4:  return { 255.0f * f, 0, 255.0f, 0 };
+    default: return { 255.0f, 0, 255.0f * (1 - f), 0 };
+  }
+}
+inline Rgbw addC(const Rgbw &a, const Rgbw &b) { return { a.r + b.r, a.g + b.g, a.b + b.b, a.w + b.w }; }
+inline float smoothC(float a, float b, float x) { return easeC(constrain((x - a) / (b - a), 0.0f, 1.0f)); }
+
+void mode_psychedelic() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(TripState))) { staticFallback(); return; }
+  TripState *st = reinterpret_cast<TripState *>(SEGENV.data);
+  const uint32_t now = strip.now;
+  const uint32_t seed = 1 + SEGMENT.start * 7919u;
+  const float trip = SEGMENT.intensity / 255.0f;
+  const float sp = 0.25f + SEGMENT.speed / 170.0f;   // trip time: Speed 128 = real time, 0 = a quarter, 255 = 1.75x
+  const float L = (float)len;
+
+  if (SEGENV.call == 0) {
+    memset(st, 0, sizeof(TripState));
+    st->last = now; st->tt = 50000; st->nextSplat = 0.3f;
+  }
+  float dt = (now - st->last) / 1000.0f;
+  st->last = now;
+  if (dt > 0.2f) dt = 0.2f;                          // paused: don't catch up
+  const float adv = dt * sp * 1000.0f + st->rem;
+  st->tt += (uint32_t)adv;
+  st->rem = adv - (uint32_t)adv;
+  const float fdt = dt * sp;
+  // the time shared with the other strips running Psychedelic at this Speed
+  const uint32_t S = fxClock(SX_TRIP, SEGMENT.speed, sp, st->tt);
+  st->tt = S;
+  // 0..1 through a cycle of P ms of trip time (exact however long it runs)
+  auto ph = [&](uint32_t P) { return (S % P) / (float)P; };
+  auto wave = [&](uint32_t P, float off) { return sinf(6.2831853f * (ph(P) + off)); };
+  auto nq = [&](uint32_t k) { return (uint16_t)(S / k); };   // noise input that moves with trip time
+
+  Rgbw mc[3];
+  uint8_t nmc = 0;
+  if (SEGMENT.check1) for (uint8_t k = 0; k < 3; k++) if (SEGCOLOR(k)) mc[nmc++] = unpackC(SEGCOLOR(k));
+
+  // ---------------- Lava Lamp
+  const uint8_t nBlob = (uint8_t)constrain((int)(2 + trip * 2.0f + L / 30.0f), 2, 7);
+  float bc[7], br[7];
+  Rgbw bcol[7];
+  // the wax colors drift around the lava set over about 3 minutes, each blob a step along from the
+  // last; the glow behind is a deep indigo
+  const float wp = ph(180000) * 5.0f;
+  for (uint8_t k = 0; k < nBlob; k++) {
+    // each blob rises and sinks on its own slow path; its size breathes
+    bc[k] = L * (0.5f + 0.40f * wave(26000 + k * 7300, k * 0.37f) + 0.07f * wave(9100 + k * 3700, k * 0.61f));
+    br[k] = L * (0.035f + 0.035f * (0.5f + 0.5f * wave(15000 + k * 4100, k * 0.23f))) + 1.0f;
+    if (nmc > 0) bcol[k] = (k & 1) && nmc > 2 ? mc[2] : mc[0];
+    else { const float q = wp + k * 1.3f; const int q0 = (int)q;
+           bcol[k] = mixC(unpackC(LAVA_WAX[q0 % 5]), unpackC(LAVA_WAX[(q0 + 1) % 5]), easeC(q - q0)); }
+  }
+  const Rgbw glow = nmc > 1 ? scaleC(mc[1], 0.14f) : mixC(Rgbw{ 18, 0, 46, 0 }, Rgbw{ 0, 14, 40, 0 }, 0.5f + 0.5f * wave(70000, 0));
+  auto lava = [&](int i) -> Rgbw {
+    float f = 0, wr = 0, wg = 0, wb = 0;
+    for (uint8_t k = 0; k < nBlob; k++) {
+      const float d = (i - bc[k]) / br[k], e = expf(-d * d);
+      f += e; wr += bcol[k].r * e; wg += bcol[k].g * e; wb += bcol[k].b * e;
+    }
+    // where blobs meet, their colors run together
+    const Rgbw wax = f > 0.001f ? Rgbw{ wr / f, wg / f, wb / f, 0 } : bcol[0];
+    const float m = smoothC(0.42f, 0.82f, f), core = smoothC(1.05f, 1.8f, f);
+    const float shimmer = 0.85f + 0.15f * perlin8((uint16_t)(i * 50 + seed), nq(30)) / 255.0f;
+    Rgbw c = mixC(scaleC(glow, 0.7f + 0.3f * perlin8((uint16_t)(i * 20), nq(90)) / 255.0f), scaleC(wax, shimmer), m);
+    return mixC(c, Rgbw{ 255, 190, 120, 0 }, core * 0.3f);    // where blobs pile up, the wax glows lighter
+  };
+
+  // ---------------- Oil Slick
+  const float scale = 20.0f + trip * 30.0f;          // swirl detail
+  auto oil = [&](int i) -> Rgbw {
+    const float n1 = perlin8((uint16_t)(i * scale + S / 28), nq(70)) / 255.0f;
+    const float n2 = perlin8((uint16_t)(i * scale * 0.55f + 9000 + S / 45), (uint16_t)(nq(110) + 3000)) / 255.0f;
+    const float h = n1 * 1.7f + n2 * 0.8f + ph(45000);
+    const float fold = fabsf(sinf(3.14159f * (n1 * 3.0f + n2 * 2.0f + ph(23000) * 2.0f)));
+    Rgbw c = scaleC(hueC(h), 0.22f + 0.78f * smoothC(0.08f, 0.55f, fold));
+    const float sheen = powf(fold, 12.0f);
+    c.w += 70.0f * sheen;                              // a glint of white where the film crests
+    return c;
+  };
+
+  // ---------------- Black Light
+  const float breathe = 0.65f + 0.35f * (0.5f + 0.5f * wave(8000, 0));
+  auto uvBase = [&](int i) -> Rgbw {
+    const float haze = 0.6f + 0.4f * perlin8((uint16_t)(i * 35 + seed), nq(60)) / 255.0f;
+    return scaleC(Rgbw{ 40, 0, 130, 0 }, breathe * haze);
+  };
+  auto splatStep = [&]() {
+    // splashes come every 0.6 s (Trip up) to 2.2 s (Trip down) on average, more on a longer strip
+    const uint8_t maxN = (uint8_t)constrain((int)(3 + L / 7.0f * (0.4f + trip)), 3, (int)MAX_SPLATS);
+    st->nextSplat -= fdt;
+    if (st->nextSplat <= 0 && st->n < maxN) {
+      Splat &q = st->sp[st->n++];
+      q.x = hw_random16(len * 16) / 16.0f;
+      q.age = 0; q.life = 3.0f + hw_random8() / 255.0f * 4.0f;
+      q.size = (2.0f + hw_random8() / 255.0f * 3.0f) * max(1.0f, L / 45.0f);
+      q.drift = (hw_random8() / 255.0f - 0.5f) * 1.2f;
+      q.col = hw_random8(nmc > 0 ? nmc : 5);
+      st->nextSplat = (1.8f - trip * 1.3f) * (0.5f + hw_random8() / 255.0f) * (40.0f / max(20.0f, L));
+    }
+    for (uint8_t k = 0; k < st->n;) {
+      Splat &q = st->sp[k];
+      q.age += fdt; q.x += q.drift * fdt;
+      if (q.age >= q.life) { st->sp[k] = st->sp[--st->n]; continue; }
+      k++;
+    }
+  };
+  auto blacklight = [&](int i) -> Rgbw {
+    Rgbw c = uvBase(i);
+    for (uint8_t k = 0; k < st->n; k++) {
+      const Splat &q = st->sp[k];
+      // blooms in a third of a second, glows for a while, then fades out over the last 60% of its life
+      const float hold = q.life * 0.4f;
+      const float env = q.age < 0.3f ? easeC(q.age / 0.3f) : q.age < hold ? 1.0f : powf(1.0f - (q.age - hold) / (q.life - hold), 1.3f);
+      const float rad = q.size * (0.45f + 0.55f * min(1.0f, q.age / 0.7f));
+      const float d = (i - q.x) / rad;
+      const float g = expf(-d * d) * env;
+      if (g > 0.003f) c = addC(c, scaleC(nmc > 0 ? mc[q.col] : unpackC(BLACKLIGHT[q.col]), g));
+    }
+    return c;
+  };
+
+  // ---------------- Melt
+  const float cx = (L - 1) * 0.5f, rings = 1.0f + trip * 2.6f;
+  auto melt = [&](int i) -> Rgbw {
+    const float d = fabsf(i - cx) / max(1.0f, cx);    // 0 in the middle, 1 at both ends
+    const float h = d * rings * 0.5f - ph(14000) + 0.12f * sinf(6.2831853f * ph(31000) + d * 3.0f) + ph(90000);
+    const float moire = 0.5f + 0.5f * sinf(6.2831853f * (d * rings * 1.7f - ph(7000))) * sinf(6.2831853f * (d * rings * 0.9f + ph(11000)));
+    const float wv = (d - (ph(9000) * 1.5f - 0.25f)) / 0.12f;   // a slow wave of light rolling outward
+    const float pulse = expf(-wv * wv);
+    Rgbw c = scaleC(hueC(h), 0.18f + 0.82f * moire * moire);
+    c = mixC(c, hueC(h + 0.5f), pulse * 0.35f);
+    c.w += 60.0f * pulse;
+    return c;
+  };
+
+  auto look = [&](uint8_t which, int i) -> Rgbw {
+    switch (which) { case 0: return lava(i); case 1: return oil(i); case 2: return blacklight(i); default: return melt(i); }
+  };
+  const uint8_t lk = (uint16_t)SEGMENT.custom1 * 5 >> 8;   // 0 lava, 1 oil, 2 black light, 3 melt, 4 tour
+  uint8_t a = lk, b = 255;
+  float kf = 1.0f;
+  if (lk == 4) {                                     // tour: 25 s each, a slow 2.5 s crossfade from the last one
+    const uint32_t per = 25000, f = now % per;
+    a = (now / per) % 4;
+    if (f < 2500) { b = (a + 3) % 4; kf = easeC(f / 2500.0f); }
+  }
+  if (a == 2 || b == 2) splatStep();
+  for (int i = 0; i < len; i++) {
+    Rgbw c = look(a, i);
+    if (b != 255) c = mixC(look(b, i), c, kf);
+    SEGMENT.setPixelColor(i, packC(c));
+  }
+}
+const char _data_psychedelic[] PROGMEM =
+  "Psychedelic@Speed,Trip,Look,,,My colors;!,!,!;;1;sx=96,ix=160,c1=255,o1=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -2371,6 +2583,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_ucf_knights,       _data_ucf_knights);      // 238 (sound reactive)
     add(&mode_autumn_harvest,    _data_autumn_harvest);   // 239
     add(&mode_star_wars,         _data_star_wars);        // 240
+    add(&mode_psychedelic,       _data_psychedelic);      // 241
   }
 
   void loop() override {}

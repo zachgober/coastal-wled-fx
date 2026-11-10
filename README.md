@@ -109,14 +109,36 @@ Controls: Speed, **Action** (how often they strike and shoot, how many sparks an
 **My colors** (slot 1 = the hero's saber, slot 2 = the villain's). Each segment fights its own duel;
 Hyperspace and Twin Suns run in step on every strip.
 
+### Psychedelic (id 241)
+
+![Psychedelic](effect-preview-psychedelic.png)
+
+*Time runs down, pixels across: Lava Lamp, Oil Slick, Black Light, Melt.*
+
+Trippy, slow-moving color for a mellow night.
+
+| Look (slider) | What it does |
+|---|---|
+| Lava Lamp (0–50) | Soft blobs of glowing wax drift up and down the strip, merging and splitting. Each blob is a step along the lava colors (orange, hot pink, magenta, violet, red) and their colors run together where they meet; the whole set slowly shifts over about 3 minutes, over a deep indigo glow |
+| Oil Slick (51–101) | Iridescent swirls like oil on water: rainbow film colors flowing and folding into each other, with dark ripples and a glint of white sheen where the film crests |
+| Black Light (102–152) | A dim ultraviolet purple, breathing slowly, where fluorescent splashes (neon green, hot pink, blaze orange, electric yellow, aqua) bloom, glow for a few seconds and fade away |
+| Melt (153–203) | A kaleidoscope: rainbow rings pouring out of the middle of the strip both ways, with moiré pulses that swell and fade and a slow wave of light rolling outward |
+| Tour (204–255, default) | The four in turn, 25 seconds each, with a slow 2.5 s crossfade |
+
+Controls: Speed (1x at 128; the default 96 is a little slower), **Trip** (how much is going on: more
+blobs, more splashes, finer swirls, more rings), Look, **My colors** (Lava Lamp: slot 1 = the wax,
+slot 2 = the glow behind it, slot 3 = every other blob; Black Light: slots 1–3 are the fluorescent
+colors). It runs on its own clock, shared with the other strips, so the whole house melts together;
+the black light splashes are each strip's own.
+
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–240** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-240, strips in step" when the firmware is running.
+Effect IDs on this build: **220–241** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-241, strips in step" when the firmware is running.
 
 ## Strips in step
 Every strip (segment) running the same effect at the same Speed keeps the same timing, however far
@@ -127,7 +149,7 @@ the patio and side strips.
 
 | Shared now | Effects |
 |---|---|
-| The effect's own clock | Star Wars (Hyperspace, Twin Suns), Candy Land, Autumn Harvest (Turning Leaves, Harvest Bulbs) |
+| The effect's own clock | Star Wars (Hyperspace, Twin Suns), Candy Land, Autumn Harvest (Turning Leaves, Harvest Bulbs), Psychedelic |
 | When the routine started | Vegas Marquee (chase steps and routine changes), Neon Sign (animation), Sunrise, Hyperspace's 17 s cycle |
 | The rounds | Jackpot (the same game, reels stopping together, the payout together), Roulette (spins start together) |
 | The strikes | Lightning Storm: every strip flashes at once, each on its own section |
@@ -160,14 +182,14 @@ running picks it up mid-way (a sunrise on one strip, then the other: both bright
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
    Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-240, strips in step".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-241, strips in step".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs) and the Star Wars scenes (88–92: Star Wars, Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns),
+   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs) the Star Wars scenes (88–92: Star Wars, Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns) and the Psychedelic scenes (93–97: Psychedelic, Lava Lamp, Oil Slick, Black Light, Melt),
    plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
    since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
-   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights, Autumn Harvest and Star Wars.)
+   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights, Autumn Harvest, Star Wars and Psychedelic.)
 
 ## Changing an effect
 
