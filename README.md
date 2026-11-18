@@ -173,14 +173,18 @@ running picks it up mid-way (a sunrise on one strip, then the other: both bright
    and paste the contents.
 3. Open the **Actions** tab. "Build Coastal FX firmware" runs on every upload
    (or press **Run workflow**). It takes about 10 minutes the first time.
-4. Open the finished run and download **Coastal-FX-firmware** (a zip). Inside is
-   `Coastal-FX_WLED-16.0.1_ESP32.bin`.
+4. Open the finished run and download **Coastal-FX-firmware** (a zip). Inside are
+   `Coastal-FX_WLED-16.0.1_ESP32.bin` (boards on WLED's "ESP32" release, like the patio box) and
+   `Coastal-FX_WLED-16.0.1_ESP32_Ethernet.bin` (boards on the "ESP32_Ethernet" release, like the
+   Family Room RGBW Controller). Use the one whose name matches the board's release; the OTA page
+   says which one the board has if you pick the wrong file.
 
 ## Install on the board (over Wi-Fi)
 
 1. **Back up first:** WLED → Config → Security & Updates → *Backup presets* and *Backup configuration*.
 2. Config → Security & Updates → **Manual OTA update** → choose the `.bin` → Update.
-   Leave "Ignore firmware validation" unchecked; this build uses the same release name (ESP32) as the board.
+   Leave "Ignore firmware validation" unchecked; each build uses the same release name as the boards it's for
+   (ESP32 or ESP32_Ethernet). Forcing the plain ESP32 file onto an Ethernet board would turn its Ethernet off.
 3. The board reboots in about 30 s. Settings and presets are kept.
 4. Check Info: version 16.0.1 and "Coastal FX: ids 220-241, strips in step".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode

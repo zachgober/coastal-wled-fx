@@ -55,27 +55,31 @@ jobs:
 
       - name: Build firmware
         working-directory: wled
-        run: pio run -e coastal_esp32
+        run: pio run -e coastal_esp32 -e coastal_esp32_eth
 
       - name: Rename firmware
         run: |
           mkdir out
-          cp wled/build_output/release/*.bin out/Coastal-FX_WLED-16.0.1_ESP32.bin
+          cp wled/build_output/release/WLED_*_ESP32.bin out/Coastal-FX_WLED-16.0.1_ESP32.bin
+          cp wled/build_output/release/WLED_*_ESP32_Ethernet.bin out/Coastal-FX_WLED-16.0.1_ESP32_Ethernet.bin
           ls -l out
 
       - name: Check the effects are in the firmware
         run: |
-          BIN=out/Coastal-FX_WLED-16.0.1_ESP32.bin
           missing=0
+          : > out/build-info.txt
+          for BIN in out/Coastal-FX_WLED-16.0.1_ESP32.bin out/Coastal-FX_WLED-16.0.1_ESP32_Ethernet.bin; do
+          echo "== $BIN"
           for fx in "Holiday Bulbs@" "Holiday Twinkle@" "Candy Cane@" "Retro C9@" "Fireworks Burst@" \
                     "Ocean Swell@" "Lightning Storm@" "Sunrise@Minutes" "Boom Fireworks@" "Pool Shimmer@" "Northern Lights@" \
                     "Vegas Marquee@" "Neon Sign@" "Jackpot@" "Roulette@" "Dancing Fountains@" "Showgirl Sparkle@" "Candy Land@" "UCF Knights@" \
                     "Autumn Harvest@" "Star Wars@" "Psychedelic@"; do
             if strings "$BIN" | grep -q "$fx"; then echo "ok: $fx"; else echo "MISSING: $fx"; missing=1; fi
           done
-          { echo "Built $(date -u +%F' '%H:%MZ) from ${GITHUB_SHA::7}"; echo "Size: $(stat -c%s $BIN) bytes";
-            echo "Release name: $(strings $BIN | grep -m1 -x ESP32 || echo '?')"; } > out/build-info.txt
-          strings "$BIN" | grep -E "@" | grep -E "Holiday|Candy|Retro C9|Fireworks Burst|Ocean Swell|Lightning Storm|Sunrise@Minutes|Boom|Pool Shimmer|Northern Lights|Vegas Marquee|Neon Sign|Jackpot|Roulette|Dancing Fountains|Showgirl Sparkle|UCF Knights|Autumn Harvest|Star Wars|Psychedelic" >> out/build-info.txt
+          { echo "$(basename $BIN): built $(date -u +%F' '%H:%MZ) from ${GITHUB_SHA::7}"; echo "Size: $(stat -c%s $BIN) bytes";
+            echo "Release name: $(strings $BIN | grep -m1 -x -E 'ESP32(_Ethernet)?' || echo '?')"; echo; } >> out/build-info.txt
+          done
+          strings out/Coastal-FX_WLED-16.0.1_ESP32.bin | grep -E "@" | grep -E "Holiday|Candy|Retro C9|Fireworks Burst|Ocean Swell|Lightning Storm|Sunrise@Minutes|Boom|Pool Shimmer|Northern Lights|Vegas Marquee|Neon Sign|Jackpot|Roulette|Dancing Fountains|Showgirl Sparkle|UCF Knights|Autumn Harvest|Star Wars|Psychedelic" >> out/build-info.txt
           exit $missing
 
       - name: Publish firmware to the 'firmware' branch (direct download link)
