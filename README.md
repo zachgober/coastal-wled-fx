@@ -131,14 +131,45 @@ slot 2 = the glow behind it, slot 3 = every other blob; Black Light: slots 1–3
 colors). It runs on its own clock, shared with the other strips, so the whole house melts together;
 the black light splashes are each strip's own.
 
+### Underwater (id 242)
+
+![Underwater](effect-preview-underwater.png)
+
+*Time runs down, pixels across (a 70-chip FCOB strip): Sunlit Shallows, Coral Reef, Jellyfish, Deep Sea.*
+
+Under the sea, made first for the Family Room's FCOB strips (BTF WS2814 RGBW 24 V, 14 chips a meter,
+each chip a 7 cm bar of light with a 3000 K warm white) and fine on any strip. Everything moves
+smoothly between chips, creatures are a couple of chips long, the water never goes fully dark (very
+dim levels step visibly on a 7 cm chip), and the warm white chip only adds touches (the sun, the
+anglerfish's lure, the bubbles), well clear of the strip's warning about mixed white at full power.
+
+| Look (slider) | What it does |
+|---|---|
+| Sunlit Shallows (0–50) | Turquoise water with warm shafts of sunlight swaying through it, a net of caustic ripples dancing in the light and now and then a silver fish flashing as it turns |
+| Coral Reef (51–101) | Clear blue water over a glow of coral (pink, orange, purple, yellow, red), schools of reef fish (yellow tangs, clownfish, blue tangs, pink anthias, green chromis) swimming by both ways, and once in a while a sea turtle gliding past |
+| Jellyfish (102–152) | Jellies (magenta, lavender, cyan, peach, moon) spread along the strip in indigo water, each bell squeezing to push forward and then gliding, trailing its tentacles; they turn now and then and keep clear of each other |
+| Deep Sea (153–203) | Near-dark navy where plankton sparks blue-green, lanternfish cross blinking, something unseen swims through and lights a wave of plankton, and now and then an anglerfish's warm lure bobs in the dark, then snaps |
+| Tour (204–255, default) | The four in turn, 30 seconds each, with a slow 3 s crossfade |
+
+Controls: Speed (1x at 128; the default 110 is a little calmer), **Life** (how many fish, jellies,
+sparks and bubbles), Look, **My colors** (slot 1 = the water, slots 2–3 = the fish, jellies and
+plankton), **Bubbles** (little trains of bubbles rising toward the strip's end, on any look).
+
+Two FCOB strips as one segment (140 chips, e.g. two outputs of the Family Room controller) get more
+creatures, not bigger ones: 7 sun shafts instead of 4, about twice the fish schools, 9 jellies
+instead of 5, more plankton, lanternfish and bubbles, with ripples and creatures the same size as on
+one strip. On a run that long the turtle glides in from the blue for a stretch and fades away rather
+than taking two minutes to cross. The water, light and sway follow the effect's own clock, shared
+with the other strips; the fish, jellies and sparks are each strip's own.
+
 The Vegas effects use their own colors, so each one looks right the moment it's picked whatever
 the strip was showing before. Tick **My colors** to use color slots 1–3 instead (black slots are skipped).
 
 If a color slot is black the effect uses a default (red/green for the holiday effects,
 red/white/blue for fireworks, blue/teal for the ocean).
 
-Effect IDs on this build: **220–241** in the order above. The WLED Info page shows
-"Coastal FX: ids 220-241, strips in step" when the firmware is running.
+Effect IDs on this build: **220–242** in the order above. The WLED Info page shows
+"Coastal FX: ids 220-242, strips in step" when the firmware is running.
 
 ## Strips in step
 Every strip (segment) running the same effect at the same Speed keeps the same timing, however far
@@ -149,7 +180,7 @@ the patio and side strips.
 
 | Shared now | Effects |
 |---|---|
-| The effect's own clock | Star Wars (Hyperspace, Twin Suns), Candy Land, Autumn Harvest (Turning Leaves, Harvest Bulbs), Psychedelic |
+| The effect's own clock | Star Wars (Hyperspace, Twin Suns), Candy Land, Autumn Harvest (Turning Leaves, Harvest Bulbs), Psychedelic, Underwater (the water, sunlight and sway) |
 | When the routine started | Vegas Marquee (chase steps and routine changes), Neon Sign (animation), Sunrise, Hyperspace's 17 s cycle |
 | The rounds | Jackpot (the same game, reels stopping together, the payout together), Roulette (spins start together) |
 | The strikes | Lightning Storm: every strip flashes at once, each on its own section |
@@ -186,14 +217,14 @@ running picks it up mid-way (a sunrise on one strip, then the other: both bright
    Leave "Ignore firmware validation" unchecked; each build uses the same release name as the boards it's for
    (ESP32 or ESP32_Ethernet). Forcing the plain ESP32 file onto an Ethernet board would turn its Ethernet off.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-241, strips in step".
+4. Check Info: version 16.0.1 and "Coastal FX: ids 220-242, strips in step".
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
-   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs) the Star Wars scenes (88–92: Star Wars, Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns) and the Psychedelic scenes (93–97: Psychedelic, Lava Lamp, Oil Slick, Black Light, Melt),
+   for the holiday presets (30–47, 47 = Candy Land), the Vegas scenes (70–77), the *Vegas Night* playlist (79), the UCF Knights scenes (80–83) the fall scenes (84–87: Autumn Harvest, Falling Leaves, Turning Leaves, Harvest Bulbs) the Star Wars scenes (88–92: Star Wars, Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns) the Psychedelic scenes (93–97: Psychedelic, Lava Lamp, Oil Slick, Black Light, Melt) and the Underwater scenes (98–102: Underwater, Sunlit Shallows, Coral Reef, Jellyfish, Deep Sea),
    plus the everyday ones. This replaces the board's preset list, so if you've saved new presets
    since, merge them first. (The Home app can add just the Vegas scenes without touching the rest:
-   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights, Autumn Harvest, Star Wars and Psychedelic.)
+   Lights → the strip → Scenes → **Add Vegas scenes**, and the same for Candy Land, UCF Knights, Autumn Harvest, Star Wars, Psychedelic and Underwater.)
 
 ## Changing an effect
 

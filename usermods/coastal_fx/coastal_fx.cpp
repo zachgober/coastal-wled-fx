@@ -29,6 +29,7 @@
  *   Autumn Harvest (239) - fall colors: Falling Leaves, Turning Leaves, Harvest Bulbs
  *   Star Wars (240)  - Lightsaber Duel, Blaster Fight, Hyperspace, Twin Suns
  *   Psychedelic (241) - trippy and mellow: Lava Lamp, Oil Slick, Black Light, Melt
+ *   Underwater (242) - under the sea: Sunlit Shallows, Coral Reef, Jellyfish, Deep Sea (made for FCOB strips)
  *
  * Strips in step: every strip (segment) running the same effect at the same Speed keeps the
  * same timing, however far apart they were switched on: the clocks, tours, routines, game rounds
@@ -93,7 +94,7 @@ inline uint8_t bulbSize(uint8_t v) { return 1 + (v >> 5); }
 // What each strip draws can still differ (its own stars, leaves, duel, positions); the timing
 // is what's shared.
 enum : uint8_t {   // effect numbers for the shared timeline (not the WLED ids)
-  SX_STORM, SX_SUNRISE, SX_MARQUEE, SX_NEON, SX_JACKPOT, SX_ROULETTE, SX_CANDY, SX_AUTUMN, SX_STARWARS, SX_TRIP
+  SX_STORM, SX_SUNRISE, SX_MARQUEE, SX_NEON, SX_JACKPOT, SX_ROULETTE, SX_CANDY, SX_AUTUMN, SX_STARWARS, SX_TRIP, SX_SEA
 };
 enum : uint8_t { SK_CLOCK = 250, SK_ROUND = 251 };    // keys; a routine's key is its look number
 
@@ -2544,6 +2545,411 @@ void mode_psychedelic() {
 const char _data_psychedelic[] PROGMEM =
   "Psychedelic@Speed,Trip,Look,,,My colors;!,!,!;;1;sx=96,ix=160,c1=255,o1=0";
 
+// ================================================================ Underwater (242)
+// Under the sea, made first for the Family Room's FCOB strips (BTF WS2814 RGBW 24 V: 14 chips a
+// meter, each chip a 7 cm bar of continuous light, warm white 3000 K), and fine on any strip.
+// For those strips: everything moves smoothly between chips (a creature's light is shared across
+// the chips it straddles, so nothing hops 7 cm at a time), creatures are a couple of chips long, and
+// the water never goes fully dark (very dim levels step visibly on a 7 cm chip).
+// Looks (Look slider, in fifths):
+//   0-50    Sunlit Shallows - turquoise water with swaying shafts of sunlight, caustic ripples
+//                             dancing through them and now and then a silver fish flashing as it turns
+//   51-101  Coral Reef      - clear blue water over a dim glow of coral, schools of reef fish (yellow
+//                             tangs, clownfish, blue tangs, pink anthias, green chromis) swimming by,
+//                             and once in a while a sea turtle gliding past
+//   102-152 Jellyfish       - deep indigo water where glowing jellyfish drift, each pulsing its bell to
+//                             push along with its tentacles trailing, among specks of plankton
+//   153-203 Deep Sea        - the dark of the deep: plankton sparking blue-green, a wave of glow when
+//                             something swims through, lanternfish lights, and now and then an
+//                             anglerfish's warm lure (the white chip) bobbing in the dark until it snaps
+//   204-255 Tour            - the four in turn, 30 s each, with a slow crossfade (the default)
+//   Speed (1x at 128; the default 110 is a little calmer), Life (how many fish, jellies and sparks)
+//   Checkbox "My colors": slot 1 = the water, slots 2 and 3 = the fish, jellies and plankton
+//   Checkbox "Bubbles": streams of bubbles rising along the strip (toward its end) on any look
+// The water, light and sway follow a clock shared with the other strips running Underwater at the
+// same Speed; the fish, jellies and sparks are each strip's own.
+const uint32_t REEF_FISH[5] = {
+  RGBW32(255, 165, 0, 0),    // yellow tang
+  RGBW32(255, 60, 0, 30),    // clownfish (a little white chip for its stripes)
+  RGBW32(0, 80, 255, 0),     // blue tang
+  RGBW32(255, 30, 120, 0),   // pink anthias
+  RGBW32(0, 235, 150, 0),    // green chromis
+};
+const uint32_t CORAL[5] = {
+  RGBW32(255, 40, 100, 0),   // pink
+  RGBW32(255, 85, 15, 0),    // orange
+  RGBW32(150, 30, 230, 0),   // purple
+  RGBW32(200, 190, 0, 0),    // yellow
+  RGBW32(235, 15, 35, 0),    // red
+};
+const uint32_t JELLY[5] = {
+  RGBW32(255, 20, 170, 0),   // magenta
+  RGBW32(150, 70, 255, 0),   // lavender
+  RGBW32(0, 190, 255, 0),    // cyan
+  RGBW32(255, 95, 60, 0),    // peach
+  RGBW32(70, 105, 255, 8),   // moon jelly
+};
+// sized for two FCOB strips run as one 140-chip segment (and longer pixel strips)
+constexpr uint8_t SEA_SCHOOLS = 12, SEA_JELLIES = 14, SEA_SPARKS = 40, SEA_BUBBLES = 28, SEA_GLINTS = 6, SEA_LANTERNS = 6;
+
+struct SeaSchool { float x, v, gap, wait; uint8_t n, sp, on; };
+struct SeaJelly { float x, v, ph, per, r; int8_t dir; uint8_t col; };
+struct SeaSpark { float x, age, life, r, hue; };
+struct SeaBubble { float x, x0, v, age, dist, wob; };
+struct SeaGlint { float x, v, age, life; };
+struct SeaLantern { float x, v, blink, wait; uint8_t on; };
+struct SeaState {
+  uint32_t last, tt;
+  float rem;
+  SeaSchool sch[SEA_SCHOOLS];
+  SeaJelly jel[SEA_JELLIES];
+  SeaSpark spk[SEA_SPARKS];
+  SeaBubble bub[SEA_BUBBLES];
+  SeaGlint gl[SEA_GLINTS];
+  SeaLantern lan[SEA_LANTERNS];
+  uint8_t nJel, nSpk, nBub, nGl;
+  float nextSpark, nextBurst, nextGlint;
+  float turtX, turtV, turtWait, turtGo, turtDist; uint8_t turtOn;
+  float waveX, waveV, waveWait; uint8_t waveOn;
+  float angX, angAge, angLife, angWait; uint8_t angOn;
+};
+
+inline float rnd01() { return hw_random16() / 65535.0f; }
+
+// add a soft spot of light (a creature, a spark) centred at x (in pixels, between chips allowed)
+inline void seaSplat(Rgbw *buf, int len, float x, float r, const Rgbw &c, float a) {
+  if (a <= 0.002f || r <= 0.0f) return;
+  const int i0 = max(0, (int)floorf(x - r * 2.6f)), i1 = min(len - 1, (int)ceilf(x + r * 2.6f));
+  for (int i = i0; i <= i1; i++) {
+    const float d = (i - x) / r, g = expf(-d * d) * a;
+    buf[i].r += c.r * g; buf[i].g += c.g * g; buf[i].b += c.b * g; buf[i].w += c.w * g;
+  }
+}
+
+void mode_underwater() {
+  const int len = SEGLEN;
+  if (len < 1 || !SEGENV.allocateData(sizeof(SeaState) + 2 * len * sizeof(Rgbw))) { staticFallback(); return; }
+  SeaState *st = reinterpret_cast<SeaState *>(SEGENV.data);
+  Rgbw *bufA = reinterpret_cast<Rgbw *>(SEGENV.data + sizeof(SeaState)), *bufB = bufA + len;
+  const uint32_t now = strip.now;
+  const uint32_t seed = 1 + SEGMENT.start * 7919u;
+  const float life = SEGMENT.intensity / 255.0f;
+  const float sp = 0.25f + SEGMENT.speed / 170.0f;    // Speed 128 = real time
+  const float L = (float)len;
+  // one FCOB strip is 70 chips: longer runs (two strips = 140) get more creatures, not bigger ones
+  const float LK = max(1.0f, L / 70.0f), LR = sqrtf(LK);
+
+  if (SEGENV.call == 0) {
+    memset(st, 0, sizeof(SeaState));
+    st->last = now; st->tt = 40000;
+    st->nextSpark = 0.2f; st->nextBurst = 1.5f; st->nextGlint = 2.0f;
+    st->turtWait = 12.0f + rnd01() * 20.0f; st->waveWait = 4.0f + rnd01() * 5.0f; st->angWait = 10.0f + rnd01() * 15.0f;
+    // start with fish already on the strip, so it isn't empty while the first ones swim in
+    for (uint8_t k = 0; k < SEA_SCHOOLS; k++) { st->sch[k].on = 0; st->sch[k].wait = k < 3 ? -1.0f : rnd01() * 6.0f; }
+    for (uint8_t k = 0; k < SEA_LANTERNS; k++) st->lan[k].wait = rnd01() * 4.0f;
+  }
+  float dt = (now - st->last) / 1000.0f;
+  st->last = now;
+  if (dt > 0.2f) dt = 0.2f;                           // paused: don't catch up
+  const float adv = dt * sp * 1000.0f + st->rem;
+  st->tt += (uint32_t)adv;
+  st->rem = adv - (uint32_t)adv;
+  const float fdt = dt * sp;
+  const uint32_t S = fxClock(SX_SEA, SEGMENT.speed, sp, st->tt);
+  st->tt = S;
+  auto ph = [&](uint32_t P) { return (S % P) / (float)P; };
+  auto wave = [&](uint32_t P, float off) { return sinf(6.2831853f * (ph(P) + off)); };
+  auto nq = [&](uint32_t k) { return (uint16_t)(S / k); };
+
+  // my colors: slot 1 the water, slots 2-3 the creatures
+  const bool mine = SEGMENT.check1;
+  const bool hasWater = mine && SEGCOLOR(0);
+  const Rgbw myWater = unpackC(SEGCOLOR(0));
+  Rgbw mc[2]; uint8_t nmc = 0;
+  if (mine) for (uint8_t k = 1; k < 3; k++) if (SEGCOLOR(k)) mc[nmc++] = unpackC(SEGCOLOR(k));
+  auto water = [&](const Rgbw &def, float level) { return hasWater ? scaleC(myWater, level) : def; };
+
+  // a bright caustic net: thin lines of light that ripple and drift; cell = pixels per ripple
+  auto caustic = [&](int i, float cell, uint32_t drift) -> float {
+    const float k = 256.0f / cell;
+    const uint8_t a = ridge(perlin8((uint16_t)((uint16_t)lroundf(i * k) + seed - S / drift), nq(23)));
+    const uint8_t b = ridge(perlin8((uint16_t)((uint16_t)lroundf(i * k * 1.45f) + 9000 + S / (drift * 2)), (uint16_t)(nq(37) + 31000)));
+    return min(1.0f, (a + b) / 400.0f + (a * b) / 52000.0f);
+  };
+
+  // ---------------- Sunlit Shallows
+  auto shallows = [&](Rgbw *buf) {
+    const uint8_t nS = (uint8_t)constrain((int)(1.5f + L / 24.0f), 1, 8);
+    const float span = L / nS;
+    float sx[8], sr[8], sb[8];
+    for (uint8_t k = 0; k < nS; k++) {
+      sx[k] = span * (k + 0.5f) + span * 0.22f * wave(9000 + k * 2300, k * 0.31f) + span * 0.06f * wave(3700 + k * 900, k * 0.7f);
+      sr[k] = max(1.2f, span * 0.2f);
+      sb[k] = 0.45f + 0.55f * perlin8((uint16_t)(k * 997 + seed), nq(45)) / 255.0f;   // waves overhead dim and brighten it
+    }
+    const float cell = constrain(2.2f + L / 90.0f, 2.2f, 6.0f);
+    const Rgbw deep = water(Rgbw{ 0, 50, 140, 0 }, 0.5f), lite = water(Rgbw{ 0, 120, 150, 0 }, 1.0f);
+    for (int i = 0; i < len; i++) {
+      const float n = perlin8((uint16_t)(i * 40 + seed), nq(80)) / 255.0f;
+      float shaft = 0;
+      for (uint8_t k = 0; k < nS; k++) { const float d = (i - sx[k]) / sr[k]; shaft += expf(-d * d) * sb[k]; }
+      shaft = min(shaft, 1.2f);
+      const float c = caustic(i, cell, 40) * (0.3f + 0.85f * shaft);
+      Rgbw px = mixC(deep, lite, 0.12f + 0.5f * n);
+      px = addC(px, scaleC(Rgbw{ 95, 200, 150, 75 }, shaft * 0.65f));       // sunlight, warmed by the W chip
+      px = addC(px, scaleC(Rgbw{ 130, 255, 230, 25 }, c * 0.6f));
+      buf[i] = px;
+    }
+    // a silver fish turning in the light: a quick flash darting along
+    st->nextGlint -= fdt;
+    if (st->nextGlint <= 0 && st->nGl < SEA_GLINTS) {
+      SeaGlint &g = st->gl[st->nGl++];
+      g.x = rnd01() * (L - 1); g.v = (rnd01() < 0.5f ? -1.0f : 1.0f) * (4.0f + rnd01() * 5.0f);
+      g.age = 0; g.life = 0.45f + rnd01() * 0.45f;
+      st->nextGlint = (3.5f - life * 2.6f) * (0.5f + rnd01()) * (60.0f / max(30.0f, L));
+    }
+    for (uint8_t k = 0; k < st->nGl;) {
+      SeaGlint &g = st->gl[k];
+      g.age += fdt; g.x += g.v * fdt;
+      if (g.age >= g.life) { st->gl[k] = st->gl[--st->nGl]; continue; }
+      const float e = sinf(3.14159f * g.age / g.life);
+      seaSplat(buf, len, g.x, 0.6f, Rgbw{ 170, 215, 255, 40 }, e * e);
+      k++;
+    }
+  };
+
+  // ---------------- Coral Reef
+  auto reef = [&](Rgbw *buf) {
+    const Rgbw blue = water(Rgbw{ 0, 50, 140, 0 }, 0.8f);
+    const uint8_t nC = (uint8_t)max(2, (int)(L / 9.0f));
+    const float cspan = L / nC;
+    for (int i = 0; i < len; i++) {
+      const float n = perlin8((uint16_t)(i * 45 + seed + 5000), nq(90)) / 255.0f;
+      Rgbw px = scaleC(blue, 0.8f + 0.3f * n);
+      // the coral below glows faintly through the water, swaying a little
+      const int kc = constrain((int)(i / cspan), 0, nC - 1);
+      for (int k = max(0, kc - 1); k <= min(nC - 1, kc + 1); k++) {
+        const float cx = cspan * (k + 0.5f) + cspan * 0.3f * (h01(seed, k, 1) - 0.5f) + 0.3f * wave(6000 + k * 1700, k * 0.2f);
+        const float cr = 1.0f + 1.6f * h01(seed, k, 2), d = (i - cx) / cr;
+        px = mixC(px, unpackC(CORAL[(uint8_t)(h01(seed, k, 3) * 5) % 5]), 0.42f * expf(-d * d));
+      }
+      px = addC(px, scaleC(Rgbw{ 60, 160, 200, 10 }, caustic(i, constrain(2.5f + L / 70.0f, 2.5f, 7.0f), 55) * 0.22f));
+      buf[i] = px;
+    }
+    // schools of fish swimming by, each school one kind, in either direction
+    const uint8_t maxS = (uint8_t)constrain((int)(2.0f + (1.5f + life * 3.0f) * L / 70.0f), 2, (int)SEA_SCHOOLS);
+    for (uint8_t k = 0; k < SEA_SCHOOLS; k++) {
+      SeaSchool &s = st->sch[k];
+      if (!s.on) {
+        if (k >= maxS) continue;
+        s.wait -= fdt;
+        if (s.wait > 0) continue;
+        const bool first = s.wait < -0.5f && SEGENV.call < 3;      // the first few: already on the strip
+        s.sp = hw_random8(5); s.n = 3 + hw_random8(5); s.gap = 1.15f + rnd01() * 0.7f;
+        const float dir = rnd01() < 0.5f ? -1.0f : 1.0f;
+        s.v = dir * (1.6f + rnd01() * 3.6f);
+        s.x = first ? rnd01() * L : (dir > 0 ? -1.0f : L);
+        s.on = 1;
+      }
+      s.x += s.v * fdt;
+      const float dir = s.v > 0 ? 1.0f : -1.0f, tail = s.x - dir * (s.n - 1) * s.gap;
+      if ((dir > 0 && tail > L + 1) || (dir < 0 && tail < -2)) { s.on = 0; s.wait = 1.0f + rnd01() * 6.0f * (1.2f - life); continue; }
+      const Rgbw fc = nmc ? mc[k % nmc] : unpackC(REEF_FISH[s.sp]);
+      for (uint8_t f = 0; f < s.n; f++) {
+        const float fx = s.x - dir * f * s.gap + 0.35f * sinf(6.2831853f * (S / 1300.0f + f * 0.37f + k * 0.11f));
+        const float fl = 0.8f + 0.2f * sinf(6.2831853f * (S / 900.0f + f * 0.53f + k));   // catching the light as they turn
+        seaSplat(buf, len, fx, 0.62f, fc, fl);
+      }
+    }
+    // a sea turtle gliding slowly past
+    if (!st->turtOn) {
+      st->turtWait -= fdt;
+      if (st->turtWait <= 0) {
+        st->turtOn = 1; st->turtV = (rnd01() < 0.5f ? -1.0f : 1.0f) * (0.9f + rnd01() * 0.7f); st->turtGo = 0;
+        if (L < 40) { st->turtX = st->turtV > 0 ? -3.0f : L + 2.0f; st->turtDist = L + 6.0f; }   // short strip: swims the whole way
+        else { st->turtX = 3.0f + rnd01() * (L - 6.0f); st->turtDist = 25.0f + rnd01() * 20.0f; } // long run: glides in from the blue for a stretch
+      }
+    } else {
+      st->turtX += st->turtV * fdt; st->turtGo += fabsf(st->turtV) * fdt;
+      if (st->turtX < -4 || st->turtX > L + 3 || st->turtGo >= st->turtDist) { st->turtOn = 0; st->turtWait = (30.0f + rnd01() * 40.0f) / LR; }
+      const float dir = st->turtV > 0 ? 1.0f : -1.0f;
+      const float tf = L < 40 ? 1.0f : min(1.0f, min(st->turtGo, st->turtDist - st->turtGo) / 2.5f);  // fades in and out
+      seaSplat(buf, len, st->turtX, 1.5f, Rgbw{ 80, 120, 15, 0 }, 0.95f * tf);                         // shell
+      seaSplat(buf, len, st->turtX + dir * 1.9f, 0.55f, Rgbw{ 120, 160, 50, 0 }, 0.8f * tf);          // head
+      const float fl = 0.5f + 0.5f * sinf(6.2831853f * S / 1600.0f);                                   // flippers
+      seaSplat(buf, len, st->turtX + dir * 0.6f, 0.5f, Rgbw{ 100, 140, 35, 0 }, (0.35f + 0.35f * fl) * tf);
+    }
+  };
+
+  // ---------------- Jellyfish
+  auto jellyfish = [&](Rgbw *buf) {
+    const Rgbw base = water(Rgbw{ 5, 6, 58, 0 }, 0.45f);
+    for (int i = 0; i < len; i++) {
+      const float n = perlin8((uint16_t)(i * 35 + seed + 12000), nq(70)) / 255.0f;
+      Rgbw px = mixC(scaleC(base, 0.75f), mixC(base, Rgbw{ 14, 0, 62, 0 }, 0.5f), n);
+      const float m = perlin8((uint16_t)(i * 110 + seed), nq(35)) / 255.0f;               // plankton specks
+      px = addC(px, scaleC(Rgbw{ 50, 80, 130, 0 }, powf(m, 7.0f) * 0.9f));
+      buf[i] = px;
+    }
+    const uint8_t want = (uint8_t)constrain((int)(1.0f + (2.5f + life * 3.0f) * L / 70.0f), 2, (int)SEA_JELLIES);
+    while (st->nJel < want) {
+      const uint8_t slot = st->nJel;
+      SeaJelly &j = st->jel[st->nJel++];
+      j.x = (slot + 0.25f + 0.5f * rnd01()) * L / want;                          // spread out along the strip
+      j.dir = rnd01() < 0.5f ? -1 : 1; j.v = 0;
+      j.ph = rnd01(); j.per = 2.6f + rnd01() * 1.6f; j.r = 0.85f + rnd01() * 0.6f;
+      j.col = hw_random8(nmc ? nmc : 5);
+    }
+    if (st->nJel > want) st->nJel = want;
+    for (uint8_t k = 0; k < st->nJel; k++) {
+      SeaJelly &j = st->jel[k];
+      const float prev = j.ph;
+      j.ph += fdt / j.per;
+      if (j.ph >= 1.0f) j.ph -= 1.0f;
+      // the bell squeezes for the first fifth of each pulse: a push forward, then a glide
+      if (j.ph < 0.2f) j.v += j.dir * 3.2f * fdt / (0.2f * j.per);
+      j.v *= expf(-1.5f * fdt);
+      if (prev > j.ph) {                                                         // a new pulse: which way now
+        bool crowded = false;                                                    // keep clear of the one ahead
+        for (uint8_t q = 0; q < st->nJel; q++) { const float d = (st->jel[q].x - j.x) * j.dir; if (q != k && d > 0 && d < 4.0f) crowded = true; }
+        if (crowded || rnd01() < 0.12f) j.dir = -j.dir;                          // and now and then it just turns
+      }
+      if (j.x < 1.0f && j.dir < 0) j.dir = 1;
+      if (j.x > L - 2.0f && j.dir > 0) j.dir = -1;
+      j.x += j.v * fdt;
+      j.x = constrain(j.x, -1.0f, L);
+      const float squeeze = j.ph < 0.2f ? sinf(3.14159f * j.ph / 0.2f) : 0.0f;
+      const float bright = 0.66f + 0.26f * squeeze;
+      const Rgbw c = nmc ? mc[j.col % nmc] : unpackC(JELLY[j.col]);
+      const float r = j.r * (1.0f - 0.18f * squeeze);
+      seaSplat(buf, len, j.x, r * 2.6f, c, 0.22f * bright);                     // its glow in the water
+      seaSplat(buf, len, j.x, r, c, bright);                                     // the bell
+      // tentacles trailing behind, waving and fading
+      const Rgbw tc = mixC(c, Rgbw{ 255, 170, 220, 10 }, 0.2f);
+      const int8_t back = j.v >= 0 ? -1 : 1;
+      for (uint8_t t = 1; t <= 4; t++) {
+        const float tx = j.x + back * (r * 0.7f + t * 0.85f);
+        const float a = bright * 0.5f * expf(-t * 0.5f) * (0.7f + 0.3f * sinf(6.2831853f * (S / 650.0f + t * 0.6f + k)));
+        seaSplat(buf, len, tx, 0.6f, tc, a);
+      }
+    }
+  };
+
+  // ---------------- Deep Sea
+  auto deep = [&](Rgbw *buf) {
+    const Rgbw dark = water(Rgbw{ 0, 4, 34, 0 }, 0.25f);
+    for (int i = 0; i < len; i++) {
+      const float n = perlin8((uint16_t)(i * 30 + seed + 20000), nq(110)) / 255.0f;
+      buf[i] = mixC(scaleC(dark, 0.85f), mixC(dark, Rgbw{ 0, 12, 30, 0 }, 0.6f), n);
+    }
+    // plankton sparking: blooms in a quarter second and fades
+    auto spark = [&](float x) {
+      if (st->nSpk >= SEA_SPARKS) return;
+      SeaSpark &q = st->spk[st->nSpk++];
+      q.x = x; q.age = 0; q.life = 1.1f + rnd01() * 1.5f; q.r = 0.45f + rnd01() * 0.35f; q.hue = rnd01();
+    };
+    st->nextSpark -= fdt;
+    if (st->nextSpark <= 0) {
+      spark(rnd01() * (L - 1));
+      st->nextSpark = 1.0f / ((0.5f + life * 3.5f) * max(0.5f, L / 50.0f)) * (0.4f + rnd01() * 1.2f);
+    }
+    // something swimming through lights a wave of plankton
+    if (!st->waveOn) {
+      st->waveWait -= fdt;
+      if (st->waveWait <= 0) { st->waveOn = 1; st->waveV = (rnd01() < 0.5f ? -1.0f : 1.0f) * (4.0f + rnd01() * 4.0f) * LR; st->waveX = st->waveV > 0 ? -1.0f : L; }
+    } else {
+      st->waveX += st->waveV * fdt;
+      if (rnd01() < fdt * 9.0f) spark(st->waveX + (rnd01() - 0.5f) * 1.5f);
+      seaSplat(buf, len, st->waveX, 1.1f, Rgbw{ 0, 190, 255, 0 }, 0.55f);
+      if (st->waveX < -3 || st->waveX > L + 2) { st->waveOn = 0; st->waveWait = (16.0f - life * 9.0f) * (0.6f + rnd01() * 0.8f); }
+    }
+    for (uint8_t k = 0; k < st->nSpk;) {
+      SeaSpark &q = st->spk[k];
+      q.age += fdt;
+      if (q.age >= q.life) { st->spk[k] = st->spk[--st->nSpk]; continue; }
+      const float e = q.age < 0.25f ? easeC(q.age / 0.25f) : expf(-2.6f * (q.age - 0.25f) / q.life);
+      const Rgbw c = nmc ? mc[k % nmc] : mixC(Rgbw{ 0, 255, 170, 0 }, Rgbw{ 0, 140, 255, 0 }, q.hue);
+      seaSplat(buf, len, q.x, q.r, c, e);
+      k++;
+    }
+    // lanternfish: little lights crossing steadily, blinking now and then
+    const uint8_t nLan = (uint8_t)constrain((int)(0.5f + (1.0f + life * 1.5f) * L / 70.0f), 1, (int)SEA_LANTERNS);
+    for (uint8_t k = 0; k < nLan; k++) {
+      SeaLantern &f = st->lan[k];
+      if (!f.on) {
+        f.wait -= fdt;
+        if (f.wait <= 0) { f.on = 1; f.v = (rnd01() < 0.5f ? -1.0f : 1.0f) * (1.2f + rnd01() * 1.8f); f.x = f.v > 0 ? -1.0f : L; f.blink = rnd01() * 6.0f; }
+        continue;
+      }
+      f.x += f.v * fdt; f.blink += fdt;
+      if (f.x < -2 || f.x > L + 1) { f.on = 0; f.wait = 2.0f + rnd01() * 8.0f; continue; }
+      const float bp = fmodf(f.blink, 5.5f + k);
+      seaSplat(buf, len, f.x, 0.45f, Rgbw{ 70, 170, 255, 15 }, bp < 0.35f ? 0.05f : 0.9f);
+    }
+    // the anglerfish's lure: a warm glow bobbing in the dark, then a snap
+    if (!st->angOn) {
+      st->angWait -= fdt;
+      if (st->angWait <= 0 && L >= 8) { st->angOn = 1; st->angX = 3.0f + rnd01() * (L - 6.0f); st->angAge = 0; st->angLife = 9.0f + rnd01() * 5.0f; }
+    } else {
+      st->angAge += fdt;
+      const float t = st->angAge, T = st->angLife;
+      if (t >= T + 0.35f) { st->angOn = 0; st->angWait = (25.0f + rnd01() * 20.0f) / LR; }
+      else {
+        const float bob = 0.55f * sinf(6.2831853f * t / 2.3f) + 0.25f * sinf(6.2831853f * t / 0.9f);
+        const float x = st->angX + bob;
+        float a = t < 1.5f ? easeC(t / 1.5f) : 1.0f;
+        a *= 0.75f + 0.25f * sinf(6.2831853f * t / 1.7f);
+        if (t >= T) a = 1.6f * (1.0f - (t - T) / 0.35f);                        // the snap
+        seaSplat(buf, len, x, 2.6f, Rgbw{ 120, 55, 0, 40 }, 0.18f * a);         // the warm glow around it
+        seaSplat(buf, len, x, 0.55f, Rgbw{ 255, 120, 10, 170 }, a);             // the lure (white chip, 3000 K)
+      }
+    }
+  };
+
+  auto render = [&](uint8_t which, Rgbw *buf) {
+    switch (which) { case 0: shallows(buf); break; case 1: reef(buf); break; case 2: jellyfish(buf); break; default: deep(buf); }
+  };
+  const uint8_t lk = (uint16_t)SEGMENT.custom1 * 5 >> 8;  // 0 shallows, 1 reef, 2 jellyfish, 3 deep, 4 tour
+  uint8_t a = lk, b = 255;
+  float kf = 1.0f;
+  if (lk == 4) {                                      // tour: 30 s each, a slow 3 s crossfade from the last one
+    const uint32_t per = 30000, f = now % per;
+    a = (now / per) % 4;
+    if (f < 3000) { b = (a + 3) % 4; kf = easeC(f / 3000.0f); }
+  }
+  render(a, bufA);
+  if (b != 255) { render(b, bufB); for (int i = 0; i < len; i++) bufA[i] = mixC(bufB[i], bufA[i], kf); }
+
+  // bubbles: little bursts that rise (run toward the strip's end), speeding up and wobbling
+  if (SEGMENT.check2) {
+    st->nextBurst -= fdt;
+    if (st->nextBurst <= 0) {
+      const uint8_t n = 3 + hw_random8(5);
+      const float x0 = rnd01() * L * 0.85f;
+      for (uint8_t k = 0; k < n && st->nBub < SEA_BUBBLES; k++) {
+        SeaBubble &q = st->bub[st->nBub++];
+        q.x = q.x0 = x0; q.v = 1.5f + rnd01(); q.age = -k * (0.18f + rnd01() * 0.15f);
+        q.dist = (8.0f + rnd01() * 12.0f) * LR; q.wob = rnd01() * 6.28f;   // how far it rises before it's gone
+      }
+      st->nextBurst = (7.0f - life * 4.0f) * (0.6f + rnd01() * 0.8f) / LK;
+    }
+    for (uint8_t k = 0; k < st->nBub;) {
+      SeaBubble &q = st->bub[k];
+      q.age += fdt;
+      if (q.age > 0) { q.v = min(q.v + 2.2f * fdt, 7.5f); q.x += q.v * fdt; }
+      if (q.x > L + 1 || q.x - q.x0 > q.dist) { st->bub[k] = st->bub[--st->nBub]; continue; }
+      if (q.age > 0) {
+        const float e = 0.65f + 0.35f * sinf(q.wob + q.age * 11.0f);
+        seaSplat(bufA, len, q.x, 0.45f, Rgbw{ 110, 190, 255, 35 }, e);
+      }
+      k++;
+    }
+  }
+  for (int i = 0; i < len; i++) SEGMENT.setPixelColor(i, packC(bufA[i]));
+}
+const char _data_underwater[] PROGMEM =
+  "Underwater@Speed,Life,Look,,,My colors,Bubbles;!,!,!;;1;sx=110,ix=140,c1=255,o1=0,o2=0";
+
 }  // namespace
 
 // ---------------------------------------------------------------- usermod
@@ -2584,6 +2990,7 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_autumn_harvest,    _data_autumn_harvest);   // 239
     add(&mode_star_wars,         _data_star_wars);        // 240
     add(&mode_psychedelic,       _data_psychedelic);      // 241
+    add(&mode_underwater,        _data_underwater);       // 242
   }
 
   void loop() override {}
