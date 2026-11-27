@@ -34,7 +34,8 @@
  * Strips in step: every strip (segment) running the same effect at the same Speed keeps the
  * same timing, however far apart they were switched on: the clocks, tours, routines, game rounds
  * and lightning strikes are shared (see "strips in step" below). Each strip still draws its own
- * stars, leaves, duels and positions.
+ * stars, leaves, duels and positions. Boards with this firmware keep one house clock over the
+ * network (UDP 21330), so strips on different boards are in step too (see "house clock").
  *
  * Colors: effects that use color slots fall back to sensible defaults if a slot is black,
  * so "Holiday Bulbs" is red/green out of the box and Ocean Swell is blue/teal.
@@ -92,17 +93,24 @@ inline uint8_t bulbSize(uint8_t v) { return 1 + (v >> 5); }
 //   fxRound()  rounds that start together (a spin, a game, a lightning strike)
 // A strip on its own carries on from its own time, so nothing jumps when it's the only one.
 // What each strip draws can still differ (its own stars, leaves, duel, positions); the timing
-// is what's shared.
+// is what's shared. The timelines are shared between boards too (see "house clock" below).
 enum : uint8_t {   // effect numbers for the shared timeline (not the WLED ids)
   SX_STORM, SX_SUNRISE, SX_MARQUEE, SX_NEON, SX_JACKPOT, SX_ROULETTE, SX_CANDY, SX_AUTUMN, SX_STARWARS, SX_TRIP, SX_SEA
 };
-enum : uint8_t { SK_CLOCK = 250, SK_ROUND = 251 };    // keys; a routine's key is its look number
+// Keys: a routine's key is its look number. Below 128 the routine's start is in house time
+// (strip.now); a routine timed on its effect's own clock uses 128 + its look.
+enum : uint8_t { SK_OWN_CLOCK = 128, SK_CLOCK = 250, SK_ROUND = 251, SK_CHAIN = 252 };
 
-struct FxSync { uint32_t at, seen, lastNow; float rem; uint8_t fx, key, speed, used; };
+struct FxSync { uint32_t at, seen, lastNow, born; float rem, rate, adj; uint8_t fx, key, speed, used; };
 static FxSync fxSyncs[16];
 constexpr uint32_t SYNC_LIVE_MS = 600;                // a strip that ran in the last 0.6 s is still running
+constexpr int32_t ROUND_SAME_MS = 1500;               // rounds two boards started this close together are one round
+static bool fxDirty = false;                          // a timeline just started here: tell the other boards now
 
 inline bool fxLive(const FxSync &s) { return s.used && strip.now - s.seen <= SYNC_LIVE_MS; }
+// `at` counts in house time (so it moves when the house clock jumps)
+inline bool fxHouseTime(uint8_t key) { return key < SK_OWN_CLOCK || key == SK_ROUND || key == SK_CHAIN; }
+bool fxJoin(FxSync &s);                               // below: take another board's timeline for it, if one is running it
 
 // the slot for (effect, key, speed); `fresh` says it was just made (or taken over)
 FxSync *fxSlot(uint8_t fx, uint8_t key, uint8_t speed, bool &fresh) {
@@ -115,7 +123,8 @@ FxSync *fxSlot(uint8_t fx, uint8_t key, uint8_t speed, bool &fresh) {
   }
   if (!spare) return nullptr;                          // all in use: the strip keeps its own time
   spare->used = 1; spare->fx = fx; spare->key = key; spare->speed = speed;
-  spare->rem = 0; spare->lastNow = strip.now; spare->seen = strip.now;
+  spare->at = 0; spare->rem = 0; spare->rate = 0; spare->adj = 0;
+  spare->lastNow = strip.now; spare->seen = strip.now; spare->born = strip.now;
   fresh = true;
   return spare;
 }
@@ -127,11 +136,19 @@ uint32_t fxClock(uint8_t fx, uint8_t speed, float rate, uint32_t mine) {
   FxSync *s = fxSlot(fx, SK_CLOCK, speed, fresh);
   if (!s) return mine;
   const uint32_t now = strip.now;
-  if (fresh || !fxLive(*s)) { s->at = mine; s->rem = 0; s->lastNow = now; }
-  else if (now != s->lastNow) {                        // advance once a frame, whichever strip comes first
+  s->rate = rate;
+  if (fresh || !fxLive(*s)) {
+    s->at = mine; s->rem = 0; s->adj = 0; s->lastNow = now; s->born = now;
+    fxJoin(*s); fxDirty = true;                        // another board running it: pick up its clock
+  } else if (now != s->lastNow) {                      // advance once a frame, whichever strip comes first
     uint32_t d = now - s->lastNow;
+    if ((int32_t)d < 0) d = 0;                         // the house clock stepped back
     if (d > 200) d = 200;                              // paused: don't catch up
-    const float adv = d * rate + s->rem;
+    float adv = d * rate + s->rem;
+    if (s->adj != 0) {                                 // easing onto another board's clock: up to 1.5x / 0.5x
+      const float c = constrain(s->adj, -0.5f * adv, 0.5f * adv);
+      adv += c; s->adj -= c;
+    }
     s->at += (uint32_t)adv; s->rem = adv - (uint32_t)adv; s->lastNow = now;
   }
   s->seen = now;
@@ -145,7 +162,7 @@ uint32_t fxMark(uint8_t fx, uint8_t key, uint8_t speed, uint32_t mine) {
   bool fresh;
   FxSync *s = fxSlot(fx, key, speed, fresh);
   if (!s) return mine;
-  if (fresh || !fxLive(*s)) s->at = mine;
+  if (fresh || !fxLive(*s)) { s->at = mine; s->born = strip.now; fxJoin(*s); fxDirty = true; }
   s->seen = strip.now;
   return s->at;
 }
@@ -153,18 +170,338 @@ uint32_t fxMark(uint8_t fx, uint8_t key, uint8_t speed, uint32_t mine) {
 // Rounds that start together. `over` = this strip is ready for its next round. Returns true when
 // the strip should start one now, with `start` set to when it began: a round another strip started
 // since this strip's last one (it joins it, if that was at most `late` ms ago), else a new one
-// starting now (the others will join).
-bool fxRound(uint8_t fx, uint8_t speed, uint32_t &start, bool over, uint32_t late) {
+// starting at `when` (when its last round ended, so boards that ended together start together;
+// the others will join).
+bool fxRound(uint8_t fx, uint8_t speed, uint32_t &start, bool over, uint32_t late, uint32_t when) {
   bool fresh;
   FxSync *s = fxSlot(fx, SK_ROUND, speed, fresh);
   const uint32_t now = strip.now;
-  if (!s) { if (over) start = now; return over; }
-  const bool newer = !fresh && fxLive(*s) && (int32_t)(s->at - start) > 0 && now - s->at <= late;
+  if (!s) { if (over) start = when; return over; }
+  bool live = !fresh && fxLive(*s);
+  if (!live) { s->born = now; live = fxJoin(*s); }    // rounds already going on another board
   s->seen = now;
+  // another board started this round a moment before this strip did (both started "the same"
+  // round): this strip takes theirs
+  if (live && (int32_t)(start - s->at) > 0 && (int32_t)(start - s->at) <= ROUND_SAME_MS) { start = s->at; return true; }
   if (!over) return false;
-  if (newer) start = s->at;
-  else { start = now; s->at = now; }
+  if (live && (int32_t)(s->at - start) > 0 && (int32_t)(now - s->at) >= 0 && now - s->at <= late) start = s->at;
+  else { start = when; s->at = when; fxDirty = true; }
   return true;
+}
+
+// ---------------------------------------------------------------- house clock: every board in step
+// Each WLED board keeps its own clock (strip.now = millis() + timebase), started when it booted
+// and restarted whenever its lights are turned off, so the same effect on two boards (the patio,
+// the roofline, the family room) ran at different points however they were started. The boards
+// now keep one house clock between them over the network (UDP port 21330, nothing to set up):
+//  - Every board says hello once a second: a broadcast with its clock and the timelines above
+//    that it's running.
+//  - The house clock that has been kept the longest wins (the same age: the lowest id), and
+//    the board on it with the lowest MAC keeps it. The others ask that board the time every 2 s
+//    (like NTP: four timestamps; the quickest reply of the last eight counts) and ease onto it,
+//    at most 5% faster or slower. A board that's off by more than a quarter second (it just
+//    joined) jumps instead, and its effects start over once.
+//  - Turning the lights off no longer restarts the clock.
+//  - The timelines are shared: a board that starts an effect another board is already running
+//    joins it, rounds start together, and when two boards start the same thing at about the same
+//    moment, the later one moves onto the earlier one.
+// A board on its own carries on as before. WLED's own UDP sync can stay as it is.
+#ifndef HC_LOG
+#define HC_LOG(...)                                    // (the effect simulator prints these)
+#endif
+constexpr uint16_t HC_PORT = 21330;
+constexpr uint8_t HC_VER = 1;
+enum : uint8_t { HC_HELLO = 1, HC_PING = 2, HC_PONG = 3 };
+constexpr uint32_t HC_GONE_MS = 3500;                  // a board not heard from for this long has gone
+constexpr int32_t HC_JUMP_MS = 250;                    // further off than this: jump instead of easing
+constexpr uint8_t HC_PEERS = 8;
+
+#pragma pack(push, 1)
+struct HcHead {                                        // every packet starts with this
+  char magic[4];                                       // "CFXS"
+  uint8_t ver, type, n, flags;                         // n: timelines that follow (hello); flags: bit 0 on the house clock,
+                                                       //   bit 1 settled on it (could keep it)
+  uint8_t mac[6]; uint16_t seq;
+  uint32_t line, age;                                  // the sender's house clock: id, and how long it's been kept (0.1 s)
+  uint32_t house;                                      // the sender's house time as it sent this
+  uint32_t t1, t2;                                     // ping: t1 = asker's millis; pong: t1 echoed, t2 = house time the ping came in
+};
+struct HcSlot { uint32_t at, born; float rate; uint8_t fx, key, speed, pad; };
+#pragma pack(pop)
+
+struct HcPeer { uint8_t mac[6], n, flags; uint32_t ip, heard, line, age, house; HcSlot s[16]; };
+static HcPeer hcPeers[HC_PEERS];
+
+static struct HouseClock {
+  WiFiUDP udp;
+  bool up = false, synced = true;                      // synced: on the house clock (always, when keeping it)
+  uint32_t ip = 0;
+  uint8_t mac[6] = {}, leaderMac[6] = {};
+  int8_t leader = -1;                                  // the peer keeping the clock; -1 = this board
+  uint32_t tb = 0;                                     // house time = millis() + tb
+  int32_t ease = 0; uint32_t easeAt = 0;               // ms still to ease in
+  uint32_t line = 0, age = 0, ageAt = 0;               // this board's house clock: id, age (0.1 s) at ageAt (millis)
+  uint32_t helloAt = 0, pingAt = 0, pingT1 = 0;
+  uint16_t seq = 0;
+  struct { uint32_t theta, line; uint16_t delay; } smp[8] = {};   // the keeper's house time minus my millis, on clock `line`
+  uint8_t ns = 0, nextSmp = 0;
+  int32_t err = 0;                                     // last measured offset from the keeper (ms)
+} hc;
+
+inline uint32_t hcNow() { return millis() + hc.tb; }
+inline uint32_t hcAge() { return hc.age + (millis() - hc.ageAt) / 100; }
+inline uint32_t peerAge(const HcPeer &p) { return p.age + (millis() - p.heard) / 100; }
+inline bool peerUp(const HcPeer &p) { return p.ip && millis() - p.heard < HC_GONE_MS; }
+// a board whose timelines are on the same clock as ours
+inline bool peerShares(const HcPeer &p) { return peerUp(p) && hc.synced && (p.flags & 1) && p.line == hc.line; }
+// settled on the house clock: keeping it, or asked its keeper at least four times (so a board that
+// just joined doesn't take over with its first rough measurement)
+inline bool hcSettled() {
+  if (!hc.synced) return false;
+  if (hc.leader < 0) return true;
+  uint8_t k = 0;
+  for (uint8_t i = 0; i < hc.ns; i++) if (hc.smp[i].line == hc.line) k++;
+  return k >= 4;
+}
+inline uint32_t clockAhead(int32_t ms, float rate) { return (uint32_t)(int32_t)lroundf(ms * rate); }
+// a start in house time from another board that makes sense here (not seconds from now)
+inline bool sane(const HcSlot &r, uint32_t now) { return !fxHouseTime(r.key) || (int32_t)(r.at - now) < 5000; }
+
+// A timeline just started here (fresh or after a pause): if another board is running it, take its
+// value: the clock or routine that started first, or the latest round / furthest strike chain.
+bool fxJoin(FxSync &s) {
+  const HcPeer *bp = nullptr;
+  const HcSlot *br = nullptr;
+  for (const auto &p : hcPeers) {
+    if (!peerShares(p)) continue;
+    for (uint8_t k = 0; k < p.n; k++) {
+      const HcSlot &r = p.s[k];
+      if (r.fx != s.fx || r.key != s.key || r.speed != s.speed || !sane(r, strip.now)) continue;
+      bool better = !br;
+      if (br) {
+        if (s.key == SK_ROUND || s.key == SK_CHAIN) better = (int32_t)(r.at - br->at) > 0;
+        else better = (int32_t)(r.born - br->born) < 0 || (r.born == br->born && memcmp(p.mac, bp->mac, 6) < 0);
+      }
+      if (better) { bp = &p; br = &r; }
+    }
+  }
+  if (!br) return false;
+  s.born = br->born;
+  if (s.key == SK_CLOCK) {
+    s.at = br->at + clockAhead((int32_t)(strip.now - bp->house), br->rate);
+    s.rem = 0; s.adj = 0; s.lastNow = strip.now;
+  } else s.at = br->at;
+  return true;
+}
+
+// Another board's hello: line up the timelines we're both running.
+void fxMerge(const HcPeer &p) {
+  const uint32_t now = hcNow();
+  for (uint8_t k = 0; k < p.n; k++) {
+    const HcSlot &r = p.s[k];
+    if (!sane(r, now)) continue;
+    for (auto &s : fxSyncs) {
+      if (!fxLive(s) || s.fx != r.fx || s.key != r.key || s.speed != r.speed) continue;
+      const int32_t d = (int32_t)(r.at - s.at);
+      if (s.key == SK_ROUND) {
+        // a newer round there: join it when ours is over; one they started just before ours: it's the same round
+        if (d > ROUND_SAME_MS || (d < 0 && d >= -ROUND_SAME_MS)) s.at = r.at;
+      } else if (s.key == SK_CHAIN) {
+        if (d > 0) s.at = r.at;                        // their strike chain is ahead: follow it
+      } else if ((int32_t)(r.born - s.born) < 0 || (r.born == s.born && memcmp(p.mac, hc.mac, 6) < 0)) {
+        // theirs started first: take it
+        s.born = r.born;
+        if (s.key != SK_CLOCK) s.at = r.at;
+        else {
+          const int32_t err = d + (int32_t)clockAhead((int32_t)(now - p.house), r.rate)
+                                - (int32_t)clockAhead((int32_t)(now - s.lastNow), s.rate);
+          if (err > 300 || err < -300) { s.at += (uint32_t)err; s.adj = 0; }
+          else s.adj = (float)err;
+        }
+      }
+      break;
+    }
+  }
+}
+
+// This board's clock moves by d ms at once: keep the timelines where they were, and start the
+// effects over (they keep their own times in house time).
+void hcJump(int32_t d) {
+  HC_LOG("jump %+d ms", (int)d);
+  hc.tb += (uint32_t)d; hc.ease = 0;
+  for (auto &s : fxSyncs) {
+    if (!s.used) continue;
+    s.seen += d; s.lastNow += d; s.born += d;
+    if (fxHouseTime(s.key)) s.at += d;
+  }
+  strip.timebase = hc.tb;
+  strip.restartRuntime();
+}
+
+void hcSend(uint8_t type, uint32_t ip, uint16_t port, const HcSlot *slots, uint8_t n, uint32_t t1, uint32_t t2) {
+  HcHead h;
+  memcpy(h.magic, "CFXS", 4);
+  h.ver = HC_VER; h.type = type; h.n = n; h.flags = (hc.synced ? 1 : 0) | (hcSettled() ? 2 : 0);
+  memcpy(h.mac, hc.mac, 6); h.seq = ++hc.seq;
+  h.line = hc.line; h.age = hcAge(); h.t1 = t1; h.t2 = t2;
+  if (!hc.udp.beginPacket(IPAddress(ip), port)) return;
+  h.house = hcNow();
+  hc.udp.write((const uint8_t *)&h, sizeof(h));
+  if (n) hc.udp.write((const uint8_t *)slots, n * sizeof(HcSlot));
+  hc.udp.endPacket();
+}
+
+void hcHello() {
+  HcSlot out[16];
+  uint8_t n = 0;
+  const uint32_t now = hcNow();
+  if (hc.synced) for (const auto &s : fxSyncs) {
+    if (!fxLive(s)) continue;
+    HcSlot &o = out[n++];
+    o.fx = s.fx; o.key = s.key; o.speed = s.speed; o.pad = 0; o.born = s.born; o.rate = s.rate;
+    o.at = s.key == SK_CLOCK ? s.at + clockAhead((int32_t)(now - s.lastNow), s.rate) : s.at;
+  }
+  const uint32_t bc = ~(uint32_t)Network.subnetMask() | (uint32_t)Network.localIP();
+  hcSend(HC_HELLO, bc, HC_PORT, out, n, 0, 0);
+}
+
+// the keeper's answer to this board's last ping
+void hcPong(const HcHead &h, uint32_t t4) {
+  if (hc.leader < 0 || memcmp(h.mac, hc.leaderMac, 6) || h.t1 != hc.pingT1) return;
+  hc.pingT1 = 0;
+  const uint32_t t1 = h.t1, t2 = h.t2, t3 = h.house;
+  int32_t delay = (int32_t)(t4 - t1) - (int32_t)(t3 - t2);
+  if (delay < -2 || delay > 300) return;               // slow (or odd) answers aren't worth much
+  if (delay < 0) delay = 0;
+  const uint32_t a = t2 - t1, b = t3 - t4;
+  auto &m = hc.smp[hc.nextSmp];
+  hc.nextSmp = (hc.nextSmp + 1) % 8;
+  if (hc.ns < 8) hc.ns++;
+  m.theta = a + (uint32_t)((int32_t)(b - a) / 2);
+  m.delay = delay; m.line = h.line;
+  int bi = -1;                                         // the quickest answer of the last eight (on this clock) is the truest
+  for (int i = 0; i < hc.ns; i++)
+    if (hc.smp[i].line == h.line && (bi < 0 || hc.smp[i].delay < hc.smp[bi].delay)) bi = i;
+  const int32_t err = (int32_t)(hc.smp[bi].theta - hc.tb);
+  hc.err = err;
+  if (err > HC_JUMP_MS || err < -HC_JUMP_MS) hcJump(err);
+  else hc.ease = err;
+  hc.line = h.line;                                    // on its clock now, with its age
+  hc.age = h.age + (t4 - t1) / 200; hc.ageAt = t4;
+  hc.synced = true;
+}
+
+HcPeer *hcPeer(const uint8_t *mac) {
+  HcPeer *spare = nullptr;
+  for (auto &p : hcPeers) {
+    if (p.ip && !memcmp(p.mac, mac, 6)) return &p;
+    if (!peerUp(p) && (!spare || (spare->ip && (!p.ip || p.heard - spare->heard > 0x80000000u)))) spare = &p;
+  }
+  if (spare) { memcpy(spare->mac, mac, 6); spare->n = 0; }
+  return spare;
+}
+
+void hcReceive() {
+  static uint8_t buf[sizeof(HcHead) + 16 * sizeof(HcSlot)];
+  for (uint8_t guard = 0; guard < 8; guard++) {
+    if (hc.udp.parsePacket() <= 0) break;
+    const uint32_t rx = hcNow(), rxMs = millis();
+    const uint32_t from = (uint32_t)hc.udp.remoteIP();
+    const uint16_t port = hc.udp.remotePort();
+    const int got = hc.udp.read(buf, sizeof(buf));
+    if (got < (int)sizeof(HcHead)) continue;
+    HcHead h;
+    memcpy(&h, buf, sizeof(h));
+    if (memcmp(h.magic, "CFXS", 4) || h.ver != HC_VER || !memcmp(h.mac, hc.mac, 6)) continue;
+    if (h.type == HC_PING) { hcSend(HC_PONG, from, port, nullptr, 0, h.t1, rx); continue; }
+    if (h.type == HC_PONG) { hcPong(h, rxMs); continue; }
+    if (h.type != HC_HELLO) continue;
+    HcPeer *p = hcPeer(h.mac);
+    if (!p) continue;
+    p->ip = from; p->heard = rxMs; p->line = h.line; p->age = h.age; p->house = h.house; p->flags = h.flags;
+    p->n = (uint8_t)min((int)h.n, min(16, (got - (int)sizeof(HcHead)) / (int)sizeof(HcSlot)));
+    memcpy(p->s, buf + sizeof(HcHead), p->n * sizeof(HcSlot));
+    if (peerShares(*p)) fxMerge(*p);
+  }
+}
+
+// Which board keeps the house clock: the oldest clock around (the same age: the lowest id),
+// kept by the board on it with the lowest MAC.
+void hcElect() {
+  uint32_t line = hc.line, age = hcAge();
+  for (const auto &p : hcPeers) {
+    if (!peerUp(p) || !(p.flags & 2) || p.line == line) continue;
+    const uint32_t a = peerAge(p);
+    if (a > age || (a == age && p.line < line)) { line = p.line; age = a; }
+  }
+  int best = -1;
+  const uint8_t *bMac = line == hc.line && hcSettled() ? hc.mac : nullptr;
+  for (int i = 0; i < HC_PEERS; i++) {
+    const HcPeer &p = hcPeers[i];
+    if (!peerUp(p) || !(p.flags & 2) || p.line != line) continue;
+    if (!bMac || memcmp(p.mac, bMac, 6) < 0) { best = i; bMac = p.mac; }
+  }
+  if (best < 0) {
+    if (hc.leader >= 0) HC_LOG("keeping the clock %08x", (unsigned)hc.line);
+    hc.leader = -1; hc.synced = true; return;
+  }
+  if (best != hc.leader || memcmp(hcPeers[best].mac, hc.leaderMac, 6)) {
+    hc.leader = best; memcpy(hc.leaderMac, hcPeers[best].mac, 6);
+    hc.pingAt = millis() - 10000; hc.pingT1 = 0;
+    HC_LOG("follow %02x (clock %08x, age %u; mine %08x, age %u)", hcPeers[best].mac[5], (unsigned)hcPeers[best].line,
+           (unsigned)peerAge(hcPeers[best]), (unsigned)hc.line, (unsigned)hcAge());
+  }
+  if (hcPeers[best].line != hc.line) hc.synced = false;      // not on its clock yet: until its next answer
+}
+
+void hcSetup() {
+  hc.tb = strip.timebase;
+  hc.line = ((uint32_t)hw_random16() << 16) | hw_random16();
+  if (!hc.line) hc.line = 1;
+  hc.age = 0; hc.ageAt = millis();
+}
+
+void hcLoop() {
+  if (!hc.mac[0] && !hc.mac[1] && !hc.mac[2] && escapedMac.length() >= 12) {
+    const char *m = escapedMac.c_str();
+    for (int i = 0; i < 6; i++) { const char two[3] = { m[i * 2], m[i * 2 + 1], 0 }; hc.mac[i] = (uint8_t)strtoul(two, nullptr, 16); }
+  }
+  const bool on = Network.isConnected();
+  if (on && (!hc.up || hc.ip != (uint32_t)Network.localIP())) {
+    hc.udp.stop();
+    hc.up = hc.udp.begin(HC_PORT);
+    hc.ip = (uint32_t)Network.localIP();
+  } else if (!on && hc.up) { hc.udp.stop(); hc.up = false; }
+  if (hc.up) {
+    hcReceive();
+    hcElect();
+    const uint32_t ms = millis();
+    if (hc.leader >= 0 && ms - hc.pingAt >= (!hc.synced || hc.ns < 4 ? 250u : 2000u)) {
+      hc.pingAt = ms; hc.pingT1 = ms;
+      hcSend(HC_PING, hcPeers[hc.leader].ip, HC_PORT, nullptr, 0, ms, 0);
+    }
+    if (ms - hc.helloAt >= 1000 || (fxDirty && ms - hc.helloAt >= 150)) { hc.helloAt = ms; fxDirty = false; hcHello(); }
+  } else hc.leader = -1;
+  if (hc.ease && millis() - hc.easeAt >= 20) {         // ease: 1 ms every 20 ms (5%), never backwards
+    hc.easeAt = millis();
+    const int32_t st = hc.ease > 0 ? 1 : -1;
+    hc.tb += (uint32_t)st; hc.ease -= st;
+  }
+  strip.timebase = hc.tb;                              // (WLED resets it when the lights go off)
+}
+
+// for the Info page
+void hcStatus(char *buf, size_t len) {
+  int others = 0;
+  for (const auto &p : hcPeers) if (peerUp(p)) others++;
+  if (!hc.up) snprintf_P(buf, len, PSTR("house clock: no network"));
+  else if (!others) snprintf_P(buf, len, PSTR("house clock: on its own"));
+  else if (hc.leader < 0) snprintf_P(buf, len, PSTR("house clock: keeping it for %d other board%s"), others, others > 1 ? "s" : "");
+  else {
+    const uint32_t ip = hcPeers[hc.leader].ip;   // IPAddress byte order: first octet lowest
+    snprintf_P(buf, len, PSTR("house clock: on %u.%u.%u.%u's%s, %d board%s"), (unsigned)(ip & 255), (unsigned)(ip >> 8 & 255),
+               (unsigned)(ip >> 16 & 255), (unsigned)(ip >> 24), hc.synced ? "" : " (joining)", others + 1, others ? "s" : "");
+  }
 }
 
 // ---------------------------------------------------------------- Holiday Bulbs
@@ -413,10 +750,11 @@ void mode_lightning_storm() {
 
   // The strikes follow one chain: each starts when the last one's flashes and pause are over (the
   // pause is longer at a lower Strike rate). The first comes 0.8 s after the storm starts, unless a
-  // storm is already on in another strip: then this strip follows its chain.
+  // storm is already on in another strip (on this board or another): then this strip follows its chain.
   bool fresh;
-  FxSync *sh = fxSlot(SX_STORM, SK_ROUND, SEGMENT.speed, fresh);
-  const bool others = sh && !fresh && fxLive(*sh);
+  FxSync *sh = fxSlot(SX_STORM, SK_CHAIN, SEGMENT.speed, fresh);
+  bool others = sh && !fresh && fxLive(*sh);
+  if (sh && !others) { sh->born = now; others = fxJoin(*sh); }   // a storm on another board: follow its chain
   if (SEGENV.call == 0) s->at = others ? sh->at : now + 800;
   else if (others && (int32_t)(sh->at - s->at) > 0) s->at = sh->at;   // another strip's chain is ahead: follow it
   uint32_t length;
@@ -980,33 +1318,33 @@ void mode_jackpot() {
   const float v = s * (8.0f + SEGMENT.speed / 32.0f) / 1000.0f;  // spin speed, pixels per ms
   const uint32_t A = 300, D = 450;                          // spin-up and slow-down times, ms
 
-  // ---- new round: every strip with Jackpot at this Speed plays the same game together. The first
-  // strip whose round is over deals the next one (outcome and end), the others join it.
-  static struct { uint32_t at, end, stop[8]; uint8_t nr, win, sym[8]; } dealt = { 0, 0, {}, 0, 0, {} };
+  // ---- new round: every strip with Jackpot at this Speed plays the same game together, on every
+  // board. The deal (the outcome, and when each reel stops) comes from when the round started, so
+  // every strip in the round deals the same one; each reel spins a touch faster or slower to land
+  // on its symbol right then.
   const bool fresh = SEGENV.call == 0 || g->nr != nr;
   uint32_t roundAt = fresh ? now - 100000 : g->start;
-  if (fxRound(SX_JACKPOT, SEGMENT.speed, roundAt, fresh || (int32_t)(now - g->end) >= 0, fresh ? UINT32_MAX : 3000)) {
+  const uint32_t due = !fresh && now - g->end < 1000 ? g->end : now;   // the next round starts as this one ends
+  if (fxRound(SX_JACKPOT, SEGMENT.speed, roundAt, fresh || (int32_t)(now - g->end) >= 0, fresh ? UINT32_MAX : 3000, due)) {
     g->nr = nr;
     g->start = roundAt;
-    const bool join = dealt.at == roundAt && dealt.nr == nr;   // another strip dealt this round
-    if (join) {
-      g->win = dealt.win;
-      for (int r = 0; r < nr; r++) g->sym[r] = dealt.sym[r];
+    uint32_t h = stormHash(roundAt * 2654435761u ^ (SEGMENT.speed * 40503u + 17));
+    auto rnd = [&](uint32_t lim) { h = stormHash(h + 0x9e3779b9u); return (uint8_t)((((h >> 8) & 0xFFFF) * lim) >> 16); };
+    const uint8_t odds = 8 + ((SEGMENT.intensity * 3) >> 2);   // chance out of 256: 8..199
+    g->win = rnd(256) < odds;
+    if (g->win) {
+      const uint8_t sy = rnd(NSYM);
+      for (int r = 0; r < nr; r++) g->sym[r] = sy;
     } else {
-      const uint8_t odds = 8 + ((SEGMENT.intensity * 3) >> 2);   // chance out of 256: 8..199
-      g->win = hw_random8() < odds;
-      if (g->win) {
-        const uint8_t sy = hw_random8(NSYM);
-        for (int r = 0; r < nr; r++) g->sym[r] = sy;
-      } else {
-        for (int r = 0; r < nr; r++) g->sym[r] = hw_random8(NSYM);
-        if (hw_random8() < 100) for (int r = 1; r < nr - 1; r++) g->sym[r] = g->sym[0];   // near miss
-        bool same = nr > 1;
-        for (int r = 1; r < nr; r++) if (g->sym[r] != g->sym[0]) same = false;
-        if (same) g->sym[nr - 1] = (g->sym[0] + 1 + hw_random8(NSYM - 1)) % NSYM;      // not a win
-      }
+      for (int r = 0; r < nr; r++) g->sym[r] = rnd(NSYM);
+      if (rnd(256) < 100) for (int r = 1; r < nr - 1; r++) g->sym[r] = g->sym[0];   // near miss
+      bool same = nr > 1;
+      for (int r = 1; r < nr; r++) if (g->sym[r] != g->sym[0]) same = false;
+      if (same) g->sym[nr - 1] = (g->sym[0] + 1 + rnd(NSYM - 1)) % NSYM;      // not a win
     }
-    uint32_t prevStop = 0;
+    const uint32_t base = 1600 - SEGMENT.speed * 3;            // 1600 .. 835 ms
+    const uint32_t stagger = 650 - (SEGMENT.speed * 3) / 2;    // 650 .. 268 ms
+    uint32_t stop = 0;
     for (int r = 0; r < nr; r++) {
       Reel &rl = g->reel[r];
       // where the result symbol sits centered in the window
@@ -1016,32 +1354,17 @@ void mode_jackpot() {
       while (pf < 0) pf += C;
       rl.p0 = fresh ? (float)((hw_random8(NSYM) * s + s / 2 - L / 2 + (int)C * 2) % (int)C) : rl.pf;
       rl.pf = pf;
-      // nominal stop time, then nudged later so the reel lands exactly on its symbol
-      const uint32_t base = 1600 - SEGMENT.speed * 3;            // 1600 .. 835 ms
-      const uint32_t stagger = 650 - (SEGMENT.speed * 3) / 2;    // 650 .. 268 ms
-      const uint32_t nom = r == 0 ? base : prevStop + stagger;
+      // when it stops: one after another, a little later at random (the same on every strip)
+      stop = (r == 0 ? base : stop + stagger) + stormHash(roundAt * 31u + r * 977u + 5) % 240;
+      rl.stop = stop;
+      // spin a touch faster or slower to land on the symbol then (never much slower than its speed)
       float need = fmodf(pf - rl.p0, C); if (need < 0) need += C;
-      if (join) {
-        // stop when the dealer's reel stops: spin a touch faster or slower to land on the symbol
-        rl.stop = dealt.stop[r];
-        const float run = rl.stop - A / 2.0f - D / 2.0f;       // the reel covers v * run pixels
-        float turns = roundf((v * run - need) / C);
-        if (need + turns * C <= 0) turns += 1;
-        rl.v = (need + turns * C) / run;
-      } else {
-        const float dNom = v * (nom - A / 2.0f - D / 2.0f);
-        float extra = fmodf(need - dNom, C); if (extra < 0) extra += C;
-        rl.stop = nom + (uint32_t)(extra / v);
-        rl.v = v;
-      }
-      prevStop = rl.stop;
+      const float run = rl.stop - A / 2.0f - D / 2.0f;       // the reel covers v * run pixels
+      float turns = roundf((v * run - need) / C);
+      while (need + turns * C < 0.7f * v * run) turns += 1;
+      rl.v = (need + turns * C) / run;
     }
-    if (join) g->end = dealt.end;                      // finish together, so the next round starts together
-    else {
-      g->end = roundAt + prevStop + 400 + (g->win ? 5600 : 1500);
-      dealt.at = roundAt; dealt.end = g->end; dealt.nr = nr; dealt.win = g->win;
-      for (int r = 0; r < nr; r++) { dealt.sym[r] = g->sym[r]; dealt.stop[r] = g->reel[r].stop; }
-    }
+    g->end = roundAt + stop + 400 + (g->win ? 5600 : 1500);
   }
 
   const uint32_t t = now - g->start;
@@ -1144,7 +1467,8 @@ void mode_roulette() {
   // together (a strip that's done joins a spin another strip just started)
   uint32_t spinAt = w->start;
   const bool over = w->phase == 2 && t > w->tDrop + settleMs + showMs;
-  if (fxRound(SX_ROULETTE, SEGMENT.speed, spinAt, over, SEGENV.call == 0 ? UINT32_MAX : 3000)) {
+  const uint32_t due = w->start + (uint32_t)(w->tDrop + settleMs + showMs);   // when the last spin ended
+  if (fxRound(SX_ROULETTE, SEGMENT.speed, spinAt, over, SEGENV.call == 0 ? UINT32_MAX : 3000, over && now - due < 1000 ? due : now)) {
     // start from where the ball and wheel are now
     const float wNow = wheelAt(t);
     float bNow = w->phase == 2 && w->vb0 > 0 ? w->target + wNow : w->b0;
@@ -2072,7 +2396,7 @@ void mode_star_wars() {
   }
   // Hyperspace starts from the top (the jump about 3 s in), or in step with a strip already in it
   if (a == 2 || b == 2)
-    s->hyperAt = fxMark(SX_STARWARS, 2, SEGMENT.speed, (entered && a == 2) || rejoined ? S - 1500 : s->hyperAt);
+    s->hyperAt = fxMark(SX_STARWARS, SK_OWN_CLOCK + 2, SEGMENT.speed, (entered && a == 2) || rejoined ? S - 1500 : s->hyperAt);
 
   // ---------------- the duel
   Rgbw hero = unpackC(SW_HERO[s->duels % 3]), villain = unpackC(SW_VILLAIN);
@@ -2991,9 +3315,11 @@ class CoastalFxUsermod : public Usermod {
     add(&mode_star_wars,         _data_star_wars);        // 240
     add(&mode_psychedelic,       _data_psychedelic);      // 241
     add(&mode_underwater,        _data_underwater);       // 242
+    hcSetup();
   }
 
-  void loop() override {}
+  // the house clock: keeps this board's effects in step with the other boards
+  void loop() override { hcLoop(); }
 
   // Info page: shows which effect ids were assigned, to check presets against
   void addToJsonInfo(JsonObject &root) override {
@@ -3004,6 +3330,10 @@ class CoastalFxUsermod : public Usermod {
     char buf[40];
     snprintf_P(buf, sizeof(buf), PSTR("ids %u-%u, strips in step"), firstId, lastId);
     arr.add(buf);
+    char clk[80];
+    hcStatus(clk, sizeof(clk));
+    JsonArray row = user.createNestedArray(F("Coastal FX sync"));
+    row.add(clk);
   }
 };
 

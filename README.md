@@ -191,6 +191,33 @@ its own stars, leaves, sparkles, duels and blaster fights; it's the timing that'
 at a different Speed keeps its own timing. A strip that starts an effect another strip is already
 running picks it up mid-way (a sunrise on one strip, then the other: both brighten together).
 
+## Every board in step (house clock)
+WLED gives every board its own clock, counted from when it booted and restarted each time its lights
+are turned off, so the same effect on the patio box, the Exterior controller and the Family Room
+controller ran at different points even when they were set together. Boards with this firmware now
+keep one **house clock** between them over the network. Nothing to set up: they find each other on
+the home network (UDP port 21330, broadcast on the board's subnet).
+
+- Once a second each board sends a short hello with its clock and the timelines above that it's running.
+- The clock that has been kept the longest wins, so a board that reboots joins the others instead of
+  moving them. The board on it with the lowest MAC keeps it; the others ask it the time every 2 s
+  (NTP style: the quickest of the last eight replies counts) and ease onto it, at most 5% faster or
+  slower. In testing (three boards, one dropping 10% of packets with up to 30 ms of delay) they
+  stayed within 1–5 ms of each other.
+- A board that's more than a quarter second off (it just booted or came back on the network) jumps
+  onto the house clock once, and its effects start over at that moment.
+- Turning a board's lights off no longer restarts its clock.
+- The shared timelines go between boards too: a board that starts an effect another board is already
+  running joins it mid-way, Jackpot plays the same game on every board (the deal comes from when the
+  round started) and Roulette spins start together, Lightning Storm strikes at once everywhere, and
+  when two boards start the same effect a moment apart (Home Assistant sets them one after the
+  other) the later one moves onto the earlier one within about a second.
+- What each strip draws can still differ (random twinkles, sparkles, stars, duels); the timing is
+  what's shared. Speed has to match for the effect's own clock to be shared.
+- A board without this firmware, or one that can't reach the others, keeps its own time as before.
+- The Info page shows a "Coastal FX sync" line: "keeping it for N other boards", "on 192.168.1.x's,
+  N boards" or "on its own".
+
 ## Build (GitHub, no software to install)
 
 1. Create a new **private** repository on github.com, e.g. `coastal-wled-fx`.
@@ -217,7 +244,8 @@ running picks it up mid-way (a sunrise on one strip, then the other: both bright
    Leave "Ignore firmware validation" unchecked; each build uses the same release name as the boards it's for
    (ESP32 or ESP32_Ethernet). Forcing the plain ESP32 file onto an Ethernet board would turn its Ethernet off.
 3. The board reboots in about 30 s. Settings and presets are kept.
-4. Check Info: version 16.0.1 and "Coastal FX: ids 220-242, strips in step".
+4. Check Info: version 16.0.1, "Coastal FX: ids 220-242, strips in step", and a "Coastal FX sync"
+   line (once two or more boards have this build, it names the board keeping the house clock).
 5. Config → LED Preferences → **White management: Dual** (not Accurate). Accurate mode
    overwrites the warm-white channel these effects (and the Warm White preset) use.
 6. Restore `presets.json` from this folder (Config → Security & Updates → Restore presets)
